@@ -1,0 +1,22 @@
+# dsh-scorpio bundle patch: inserts the dual-face plugin row into the web
+# profile roster. Applied as a profile bundle layer (the `dsh.bundle.patch`
+# manifest field) over the profile composition.
+#
+# The row is a bare plugin by package name: the node half (exports ".") runs in
+# the host process (worldbook scanning + rulebook / character / dice store +
+# /scorpio/* routes + model tools + prompt guidance), and the `dsh.client`
+# declaration in package.json makes the browser half (exports "./client")
+# load in the web GUI, where it registers the 「天蝎座」 betterSidebar tab.
+#
+# The host half serves EVERY session (it is mounted process-wide), and decides
+# per session whether that session runs the Scorpio agent preset — the sidebar
+# tab hides itself and the tools report "预设未启用" for every other preset.
+# Scorpio's own tools and persona come from the `scorpio` agent preset
+# (preset/agent.cordis.yml, installed to ~/.dsh/.agent-presets/scorpio).
+#
+# Install from the repo root with either:
+#   dsh plugin --profile web add file:./dsh-scorpio      (or a link: path)
+# or the bundled helper:   bash scripts/install.sh
+- insert:
+    - id: scorpio
+      name: 'dsh-scorpio'

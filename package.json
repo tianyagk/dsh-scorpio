@@ -1,0 +1,64 @@
+{
+  "name": "dsh-scorpio",
+  "version": "0.2.0",
+  "description": "dsh-scorpio（天蝎座 Scorpio）: a DeepSeek Harness web plugin that ships a real-time online TRPG agent preset. Its capability is split into three axes — 【世界书】(a worldbook in the workspace, each able to hold several rulebooks of different flavours: d100 / d20 / d6 pool) · 【模组集】(per-world modules, each an opening hook for one adventure) · 【角色卡】(a per-world character pool, one of which is imported into a session) — plus a dice adjudication engine (NdM±K, named checks, opposed rolls) that every important action must pass through. Each session is a tuple of world + rulebook + module + character; the configuration window registers through ctx.betterSidebar while the dice card is a draggable overlay registered on shell.overlay.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node src/host/selftest.ts",
+    "test:preset": "node src/host/presettest.ts",
+    "selftest": "node src/host/selftest.ts && node src/host/presettest.ts",
+    "install:profile": "bash scripts/install.sh",
+    "uninstall:profile": "bash scripts/uninstall.sh"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "plugin",
+    "web",
+    "dsh-better-sidebar",
+    "trpg",
+    "scorpio",
+    "天蝎座",
+    "跑团",
+    "骰子",
+    "世界书"
+  ],
+  "license": "MIT",
+  "files": [
+    "lib",
+    "preset",
+    "cordis.patch.yml",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.6.0"
+  }
+}

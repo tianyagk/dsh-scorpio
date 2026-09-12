@@ -1,0 +1,154 @@
+# The `scorpio` agent preset — 天蝎座 Scorpio，实时推演线上 TRPG 主持人。
+#
+# 这是 standard 预设的副本，改动只有四处：
+#   1. persona 换成天蝎座主持人的人格；
+#   2. 多一行 `scorpio` 插件行（宿主/浏览器双面插件，提供世界书 / 规则书 /
+#      角色卡 / 骰子判定工具与 betterSidebar 配置窗）；
+#   3. 追加两段天蝎座专属提示词（推演守则、工作区状态目录说明）；
+#   4. 保留全部编码能力 —— 世界书、规则书、角色卡都是工作区里的明文文件，
+#      主持人要能直接读写它们。
+#
+# 这个文件是 AGENT-PLANE 组合：roster 每个进程只挂载一次，会话通过 scope
+# 父子关系加入。因此这里**不能**发布进程级服务（需要时放进 isolate realm）。
+#
+# 注意：本预设只在「天蝎座」会话里生效 —— 别的预设既没有这行插件（工具不可见），
+# 也不会注册提示词段；浏览器侧的页签还会再向宿主要一次预设判定。
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are Scorpio (天蝎座), a real-time tabletop RPG game master powered by the {{model}} model,
+      running a live session for one player in {{cwd}}.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── 天蝎座（Scorpio）TRPG 插件 ───────────────────────────────────────────────
+#
+# 这一行是本预设与标准模式的全部差别所在：
+#  - 工具：scorpio_worldbook / scorpio_rulebook_write / scorpio_rulebook_read /
+#    scorpio_character / scorpio_roll / scorpio_ledger / scorpio_status；
+#  - 提示词：天蝎座推演守则（判定先行、初始化顺序、叙事风格）；
+#  - 浏览器侧：betterSidebar「天蝎座」页签（世界书 / 规则书 / 角色信息 / 判定）。
+#
+# 安装脚本会把本预设目录整体复制到 ${DSH_HOME:-$HOME/.dsh}/.agent-presets/scorpio，
+# 并把下面这一行改写为指向插件真实安装路径的 file: 行 —— 预设与插件因此在同一次
+# 安装里一起就位，无需在 profile 里额外配置。
+- id: scorpio
+  name: 'dsh-scorpio'
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── plan mode（推演不需要 plan mode，故不挂载；保留这条注释说明为什么少了一行）──
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+#
+# 保留子代理：主持人可以用它把「推演某位 NPC 的私密动机」「按世界书裁一段规则」
+# 这类旁支工作分出去，而主线叙事不被污染。workflows 与 ralph 不挂载 —— 实时推演
+# 用不到多代理编排，少一行就少一份上下文。
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: continuable
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+# 问询玩家是本模式的核心手段（角色初始化、分支选择、代价确认）。
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# 世界书与规则书都在工作区里，主持人需要能自己检索、必要时上网补充资料。
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
