@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type SnapshotResponse } from './api.ts'
 import { ensureCss } from './styles.ts'
-import { Banner, Btn, Field, MetaRow, Segmented, relTime } from './ui.tsx'
+import { Banner, Btn, Field, MetaRow, Segmented, relTime, useTheme } from './ui.tsx'
 import type { RollResult } from '../shared/model.ts'
 
 export interface DiceCardProps {
@@ -85,6 +85,7 @@ function loadMin(): boolean {
 /** 判定卡主体。 */
 export function DiceCard(props: DiceCardProps): React.ReactElement | null {
   const sessionId = props.sessionId
+  const theme = useTheme()
   const [enabled, setEnabled] = useState(false)
   const [min, setMin] = useState<boolean>(loadMin)
   const [data, setData] = useState<SnapshotResponse | undefined>(undefined)
@@ -248,6 +249,7 @@ export function DiceCard(props: DiceCardProps): React.ReactElement | null {
       ref: cardRef,
       className: 'sc-float',
       style: { left: pos.x, top: pos.y, ['--sc-float-alpha' as string]: String(alpha) } as React.CSSProperties,
+      'data-theme': theme,
     },
     // 标题栏 = 拖拽把手
     React.createElement(

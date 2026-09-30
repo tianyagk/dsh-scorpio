@@ -76,12 +76,32 @@ eq(r4.success, true, 'd6 骰池：成功数 2 ≥ 难度 2 → 成功')
 
 const crit = performRoll({ expression: '1d100' }, { rng: () => 0, schema: normalizeSchema({ system: 'x', baseDice: '1d100', direction: 'rollUnder', critSuccess: { max: 5 } }) })
 eq(crit.outcome, 'critical-success', '骰面 1 → 大成功')
+const oppSchema = normalizeSchema({
+  system: '对抗用 d100', baseDice: '1d100', direction: 'rollUnder', defaultDifficulty: 0,
+  attributes: [{ id: 'dex', label: '敏捷' }], skills: [{ id: 'dodge', label: '闪避', attribute: 'dex' }],
+})
+const oppSheet = (dex: number) => ({
+  name: 'T', attrs: [{ id: 'dex', value: dex }], skills: [{ id: 'dodge', value: 0 }],
+  slots: [], statuses: [], journal: [], initialized: false,
+})
 const opp = performRoll(
-  { expression: '1d100', opposed: { name: '守卫', value: 30 } },
+  { expression: '1d100', opposed: { name: '守卫', value: 80 } },
   { rng: fix([0.99]), schema: normalizeSchema({ system: 'x', baseDice: '1d100', direction: 'rollUnder' }) },
 )
-eq(opp.opposed?.total, 30, '对抗：对手可用固定值')
-eq(opp.outcome, 'success', '对抗：100 > 30 → 胜出')
+eq(opp.opposed?.target, 80, '对抗：对手可指定自己的目标值（技能值）')
+// 双方各掷一次（同骰 100），比"相对各自目标的余量"：
+// 玩家目标 50 → 余量 -50；守卫目标 80 → 余量 -20 → 玩家落败。
+// （旧实现比较裸骰值，100 > 80 会判成"胜出"——那正是被修掉的语义错误。）
+eq(opp.outcome, 'failure', 'rollUnder 对抗按余量比较：同骰下目标低者落败')
+
+// 属性/技能必须参与对抗：同样的骰值，属性高的一方余量大 → 结果不同
+const oppWeak = performRoll({ check: 'dodge', opposed: { name: '对手', value: 30 } }, { rng: () => 0.5, schema: oppSchema, sheet: oppSheet(0) })
+const oppStrong = performRoll({ check: 'dodge', opposed: { name: '对手', value: 30 } }, { rng: () => 0.5, schema: oppSchema, sheet: oppSheet(90) })
+ok(
+  oppWeak.outcome !== oppStrong.outcome,
+  '属性参与对抗（旧实现对 dex=0 与 dex=90 给出完全相同的结果）',
+  { weak: oppWeak.outcome, strong: oppStrong.outcome },
+)
 
 // ── 世界书 ─────────────────────────────────────────────────────────────────
 section('世界书')

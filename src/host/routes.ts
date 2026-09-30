@@ -17,10 +17,13 @@ import {
   PLUGIN_ID,
   PRESET_ID,
   ROUTES,
+  RULE_STYLES,
+  VERSION,
   emptyCharacterBody,
   ruleStyleInfo,
   slugify,
   type BindRunBody,
+  type CharacterBody,
   type CharacterUpsertBody,
   type LoadWorldBody,
   type RollRequest,
@@ -33,7 +36,7 @@ import {
 } from '../shared/model.ts'
 import { performRoll } from './dice.ts'
 import { isTrustedApiRequest } from './fence.ts'
-import { ScorpioStore, reconcileBody } from './store.ts'
+import { ScorpioStore } from './store.ts'
 import {
   PathFenceError,
   readWorldbookFile,
@@ -41,8 +44,6 @@ import {
   scanWorldbook,
 } from './worldbook.ts'
 import { log, type PluginContext, type PluginWebRoute, type PluginWebServer } from './context.ts'
-
-const VERSION = '0.2.0'
 
 export interface ScorpioRoutesDeps {
   ctx: PluginContext
@@ -125,6 +126,30 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
       '该会话无法切换预设——切换会尝试恢复一个已不存在的预设并失败；请新建一个会话，' +
       '在「Agent 预设」里选择「天蝎座 Scorpio」。'
     )
+  }
+
+  /**
+   * 产物落盘路径的**职责边界**：只允许写插件自己的产物。
+   * 仅靠 `resolveInside` 只有"工作区边界"——实测能覆盖世界书源文件
+   * （corpus/xxx.md）与会话绑定（.scorpio/session.json），因此这里再收一层：
+   * 拒绝 `.scorpio/` 前缀、拒绝 `..` 组件、要求 `.md`、拒绝落在任何已登记世界书目录内。
+   */
+  const artifactRel = async (store: ScorpioStore, rel: string, fallback: string): Promise<string> => {
+    const target = (rel.trim() === '' ? fallback : rel.trim()).replace(/\\+/g, '/').replace(/^\.\//, '')
+    if (target.startsWith('.scorpio/') || target === '.scorpio') {
+      throw new Error('产物不能写入 .scorpio/ 状态目录')
+    }
+    if (target.startsWith('/') || target.split('/').includes('..')) {
+      throw new Error('产物路径不能是绝对路径、也不能包含 ..')
+    }
+    if (!/\.md$/i.test(target)) throw new Error('产物必须是 .md 文件')
+    for (const world of await store.worlds()) {
+      if (world.path === '') continue
+      if (target === world.path || target.startsWith(`${world.path}/`)) {
+        throw new Error(`产物不能写入世界书目录 ${world.path}/（那是玩家的源资料）`)
+      }
+    }
+    return target
   }
 
   const gate = (req: IncomingMessage): boolean => isTrustedApiRequest(req, trusted)
@@ -516,8 +541,14 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
         const store = deps.storeFor(bound.cwd)
         const world = await store.world(asString(q.get('worldId')))
         if (world === undefined) return fail(res, new Error('世界书不存在'), 404)
-        const rel = asString(q.get('rel'))
+        const rel = asString(q.get('rel')).replace(/\\+/g, '/').replace(/^\.\//, '')
         if (rel === '') return fail(res, new Error('缺少 rel'))
+        if (rel.split('/').includes('..') || rel.startsWith('/')) {
+          return fail(res, new Error('非法 rel（不允许 .. 或绝对路径）'))
+        }
+        if (!world.files.some((file) => file.rel === rel)) {
+          return fail(res, new Error('该文件不属于这本世界书'), 404)
+        }
         send(res, 200, { ok: true, ...(await readWorldbookFile(bound.cwd, `${world.path}/${rel}`)) })
       } catch (error) {
         fail(res, error, error instanceof PathFenceError ? 400 : 500)
@@ -566,11 +597,9 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
         const markdown = asString(body.markdown)
         if (markdown.trim() === '') return fail(res, new Error('规则书内容为空'))
         if (markdown.length > MAX_EDIT_CHARS) return fail(res, new Error('规则书过大（超过 600k 字符）'))
-        const style: RuleStyle = (['d100', 'd20', 'd6pool', 'custom'] as const).includes(body.style as RuleStyle)
-          ? (body.style as RuleStyle)
-          : 'custom'
+        const style: RuleStyle = RULE_STYLES.some((item) => item.id === body.style) ? (body.style as RuleStyle) : 'custom'
         const title = asString(body.title).trim() || `${world.rulesName ?? world.name}规则书（${ruleStyleInfo(style).id}）`
-        const mdRel = asString(body.path).trim() || `${title}.md`
+        const mdRel = await artifactRel(store, asString(body.path), `${title}.md`)
         const rule = await store.writeRulebook({
           worldId,
           ...(asString(body.rulebookId) === '' ? {} : { rulebookId: asString(body.rulebookId) }),
@@ -663,7 +692,7 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
           ...(asString(body.moduleId) === '' ? {} : { moduleId: asString(body.moduleId) }),
           name,
           tagline: asString(body.tagline, '（未写钩子）'),
-          mdRel: asString((body as { path?: string }).path).trim() || `modules/${name}.md`,
+          mdRel: await artifactRel(store, asString((body as { path?: string }).path), `modules/${name}.md`),
           markdown,
           ...(body.scale === undefined ? {} : { scale: body.scale }),
           ...(asString(body.players) === '' ? {} : { players: asString(body.players) }),
@@ -717,13 +746,10 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
           const template = await store.template(worldId, asString(body.templateId))
           if (template === undefined) return fail(res, new Error('角色卡不存在'), 404)
           const binding = await store.binding(sessionId)
-          const rulebook =
-            binding.rulebookId === undefined ? undefined : await store.rulebook(worldId, binding.rulebookId)
           const instance = await store.importTemplate(sessionId, template, {
             ...(binding.rulebookId === undefined ? {} : { rulebookId: binding.rulebookId }),
             ...(binding.moduleId === undefined ? {} : { moduleId: binding.moduleId }),
           })
-          void rulebook
           await store.bindRun(sessionId, { templateId: template.id })
           send(res, 200, { ok: true, template, character: instance })
           return
@@ -769,18 +795,27 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
         const rulebook =
           binding.rulebookId === undefined ? undefined : await store.rulebook(worldId, binding.rulebookId)
 
-        const bodyOf = (): ReturnType<typeof emptyCharacterBody> => ({
-          name: asString(body.name),
-          ...(asString(body.concept) === '' ? {} : { concept: asString(body.concept) }),
-          ...(asString(body.player) === '' ? {} : { player: asString(body.player) }),
-          attrs: Array.isArray(body.attrs) ? body.attrs : [],
-          skills: Array.isArray(body.skills) ? body.skills : [],
-          slots: Array.isArray(body.slots) ? body.slots : [],
-          statuses: Array.isArray(body.statuses) ? body.statuses : [],
-          journal: Array.isArray(body.journal) ? body.journal : [],
-          ...(asString(body.notes) === '' ? {} : { notes: asString(body.notes) }),
-          initialized: body.initialized === true,
-        })
+        /**
+         * 只带上"请求里确实提供了"的字段。
+         * 旧实现把缺失字段一律当空值（`name → ''`、数组 → `[]`），再整体覆盖已有角色卡，
+         * 于是任何**部分请求**都会静默清空姓名/属性/物品/经历；反过来 notes 之类
+         * 又是"空即省略"，永远清不掉——同一个函数里两种相反语义。
+         */
+        const provided = (): Partial<CharacterBody> => {
+          const out: Partial<CharacterBody> = {}
+          const has = (key: string): boolean => Object.prototype.hasOwnProperty.call(body, key)
+          const record = body as Record<string, unknown>
+          if (has('name')) out.name = asString(body.name)
+          if (has('concept')) out.concept = asString(body.concept)
+          if (has('player')) out.player = asString(body.player)
+          if (has('notes')) out.notes = asString(body.notes)
+          if (has('initialized')) out.initialized = body.initialized === true
+          for (const key of ['attrs', 'skills', 'slots', 'statuses', 'journal'] as const) {
+            const value = record[key]
+            if (Array.isArray(value)) (out as Record<string, unknown>)[key] = value
+          }
+          return out
+        }
 
         // 写角色池
         if (body.pool === true) {
@@ -788,7 +823,7 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
             {
               worldId,
               ...(asString(body.id) === '' ? {} : { templateId: asString(body.id) }),
-              body: bodyOf(),
+              body: { ...emptyCharacterBody(), ...provided() },
               ...(asString(body.rulebookId) === '' ? {} : { rulebookId: asString(body.rulebookId) }),
               ...(asString(body.moduleId) === '' ? {} : { moduleId: asString(body.moduleId) }),
               generated: body.generated === true,
@@ -802,7 +837,7 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
 
         // 写会话实例（默认路径）
         const instance = await store.instance(sessionId, worldId, rulebook)
-        const merged = { ...instance, ...bodyOf() }
+        const merged = { ...instance, ...provided() }
         const saved = await store.saveInstance(merged, 'user')
         send(res, 200, { ok: true, character: saved })
       } catch (error) {
@@ -875,7 +910,8 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
           const bound = await scoped(res, sessionId)
           if (bound === undefined) return
           const store = deps.storeFor(bound.cwd)
-          send(res, 200, { ok: true, dice: await store.diceLedger(Number(q.get('limit') ?? 60)) })
+          const rawLimit = Number(q.get('limit') ?? 60)
+          send(res, 200, { ok: true, dice: await store.diceLedger(Number.isFinite(rawLimit) ? rawLimit : 60) })
           return
         }
         if (req.method !== 'POST') return fail(res, new Error('不支持的方法'), 405)
@@ -894,7 +930,11 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
           binding.worldId === undefined
             ? undefined
             : await store.instance(sessionId, binding.worldId, rulebook)
-        const request = (body.request ?? {}) as RollRequest
+        const request = { ...((body.request ?? {}) as RollRequest) }
+        // 形状校验：`opposed: null` 会在对抗分支抛 TypeError（500）；NaN 会被当成"没给"。
+        if (request.opposed === null || typeof request.opposed !== 'object') delete request.opposed
+        if (!Number.isFinite(request.difficulty ?? 0)) delete request.difficulty
+        if (!Number.isFinite(request.modifier ?? 0)) delete request.modifier
         const result: RollResult = performRoll(
           { ...request, actor: request.actor ?? 'user' },
           { schema: rulebook?.schema, sheet },
@@ -930,5 +970,3 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
   return { routes, register }
 }
 
-/** 供工具层共用：把角色卡按规则书补齐（导出以避免重复实现）。 */
-export const reconcileForTools = reconcileBody

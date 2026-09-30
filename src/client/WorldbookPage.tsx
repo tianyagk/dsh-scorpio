@@ -419,7 +419,7 @@ export function WorldbookPage(props: WorldbookPageProps): React.ReactElement {
                 ? React.createElement(
                     'div',
                     { className: 'sc-tiny sc-muted', style: { marginTop: 6 } },
-                    '这本世界书还没有规则书。让 Agent 依据本世界生成一套即可（scorpio_rulebook_write）。',
+                    '这本世界书还没有规则书。让 Agent 依据本世界生成一套即可（scorpio_worldbook action=write_rulebook）。',
                   )
                 : React.createElement(
                     'div',
@@ -516,7 +516,7 @@ export function WorldbookPage(props: WorldbookPageProps): React.ReactElement {
           current.markdownMissing === true
             ? React.createElement(Banner, {
                 tone: 'warn',
-                text: `规则书文件已不在工作区里：${current.mdPath}。可以让 Agent 重新写入这套规则（scorpio_rulebook_write）以恢复正文。`,
+                text: `规则书文件已不在工作区里：${current.mdPath}。可以让 Agent 重新写入这套规则（scorpio_worldbook action=write_rulebook）以恢复正文。`,
               })
             : null,
           React.createElement(MetaRow, {

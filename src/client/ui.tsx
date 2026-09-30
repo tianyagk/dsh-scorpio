@@ -311,7 +311,9 @@ export function parseMarkdown(source: string): MdBlock[] {
 /** 行内标记：`code`、**粗**、*斜*。 */
 function inline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = []
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|(?<!\*)\*[^*\n]+\*(?!\*))/g
+  // 不用 lookbehind：Safari < 16.4 会在**解析期**抛 SyntaxError 使整个 bundle 失效
+  // （esbuild 只按 target 转换语法，不降级正则字面量）。
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*)/g
   let last = 0
   let match = pattern.exec(text)
   let index = 0
@@ -332,7 +334,8 @@ function inline(text: string, keyPrefix: string): ReactNode[] {
 
 /** markdown → React 元素。 */
 export function Markdown(props: { text: string; className?: string }): React.ReactElement {
-  const blocks = parseMarkdown(props.text)
+  // 规则书正文可达 24 万字符，而 snapshot 每 8 秒轮询一次：不缓存会反复重解析整篇。
+  const blocks = React.useMemo(() => parseMarkdown(props.text), [props.text])
   return React.createElement(
     'div',
     { className: `sc-md ${props.className ?? ''}` },

@@ -221,6 +221,18 @@ export function apply(ctx: PluginContext): void {
     'dsh-scorpio: 天蝎座页签',
   )
 
+  // 角标轮询与探测缓存都是模块级 Map：插件卸载时必须一并停掉，
+  // 否则每探测过一个会话就常驻一个 20 秒 interval，插件 stop 后仍在打 /scorpio/snapshot。
+  ctx.effect(
+    () => () => {
+      for (const timer of badgeTimers.values()) window.clearInterval(timer)
+      badgeTimers.clear()
+      badgeCounts.clear()
+      probes.clear()
+    },
+    'dsh-scorpio: 清理轮询与缓存',
+  )
+
   // 悬浮判定卡：注册进 frame-wide 的浮层，条目自己接管指针事件。
   const slots = ctx.get('slots') as SlotsService | undefined
   if (slots === undefined) {
@@ -302,6 +314,9 @@ function App(props: TabProps): React.ReactElement {
         await state.afterWrite()
       } catch (cause) {
         setLocalError(cause instanceof Error ? cause.message : String(cause))
+        // 必须 rethrow：子页在"成功路径"上会 onError(undefined) 并清空输入，
+        // 吞掉异常会让失败完全静默（既看不到错误，输入还被清掉）。
+        throw cause
       } finally {
         setBusy(false)
       }
@@ -321,7 +336,7 @@ function App(props: TabProps): React.ReactElement {
       {
         label: '角色卡',
         done: run?.character !== undefined && run.character.name !== '',
-        on: run?.module !== undefined && run?.character?.name === undefined,
+        on: run?.module !== undefined && (run?.character === undefined || run.character.name === ''),
       },
     ]
   }, [data])
@@ -370,6 +385,23 @@ function App(props: TabProps): React.ReactElement {
         )
       : null,
   )
+
+  if (probe === undefined) {
+    return React.createElement(
+      'div',
+      { className: 'sc-root', 'data-theme': theme },
+      head,
+      React.createElement(
+        'div',
+        { className: 'sc-body sc-scroll' },
+        React.createElement(
+          Section,
+          { title: '正在检测会话预设…' },
+          React.createElement('div', { className: 'sc-hint' }, '正在确认当前会话是否运行在「天蝎座 Scorpio」预设上。'),
+        ),
+      ),
+    )
+  }
 
   if (probe !== undefined && probe.unresolvable !== undefined) {
     return React.createElement(

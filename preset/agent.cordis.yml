@@ -51,10 +51,12 @@
 # ── 天蝎座（Scorpio）TRPG 插件 ───────────────────────────────────────────────
 #
 # 这一行是本预设与标准模式的全部差别所在：
-#  - 工具：scorpio_worldbook / scorpio_rulebook_write / scorpio_rulebook_read /
-#    scorpio_character / scorpio_roll / scorpio_ledger / scorpio_status；
-#  - 提示词：天蝎座推演守则（判定先行、初始化顺序、叙事风格）；
-#  - 浏览器侧：betterSidebar「天蝎座」页签（世界书 / 规则书 / 角色信息 / 判定）。
+#  - 工具：scorpio_worldbook（含 write_rulebook / list_rules / select_rulebook）、
+#    scorpio_module（开场引子）、scorpio_character（角色池/生成/导入）、scorpio_roll、
+#    scorpio_ledger、scorpio_run（四元组）、scorpio_status；
+#  - 提示词：天蝎座推演守则（四元组开局顺序、判定先行、叙事风格）；
+#  - 浏览器侧：betterSidebar「天蝎座」页签（世界书 / 模组集 / 角色卡）+ shell.overlay
+#    上的可拖拽悬浮判定卡。
 #
 # 安装脚本会把本预设目录整体复制到 ${DSH_HOME:-$HOME/.dsh}/.agent-presets/scorpio，
 # 并把下面这一行改写为指向插件真实安装路径的 file: 行 —— 预设与插件因此在同一次

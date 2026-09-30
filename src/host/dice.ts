@@ -199,7 +199,15 @@ export function performRoll(request: RollRequest, context: RollContext = {}): Ro
   const modifier = Number.isFinite(request.modifier) ? Number(request.modifier) : 0
 
   const roll = rollSpec(spec, rng, schema?.poolTarget)
-  roll.name = sheet?.name !== undefined && sheet.name !== '' ? sheet.name : (request.actor ?? 'player')
+  // 行动者优先级：显式 actor（含 npc:xxx）> 玩家角色名 > 'player'。
+  // 旧写法让 NPC 判定顶着玩家的名字，骰面与结论都会写错人。
+  const actorLabel = request.actor !== undefined && request.actor !== '' ? request.actor : undefined
+  roll.name =
+    actorLabel !== undefined && actorLabel !== 'player'
+      ? actorLabel
+      : sheet?.name !== undefined && sheet.name !== ''
+        ? sheet.name
+        : (actorLabel ?? 'player')
 
   // 难度语义（与 schema 的 difficultyLadder 一致）：
   //   rollUnder：目标值 = 属性 + 技能 + 难度修正 + 临时修正
@@ -211,7 +219,15 @@ export function performRoll(request: RollRequest, context: RollContext = {}): Ro
   const rawDifficulty = request.difficulty ?? basis.difficulty
   const difficultyModifier =
     direction === 'rollUnder' ? (Number.isFinite(rawDifficulty) ? Number(rawDifficulty) : 0) : 0
-  const underBase = schema?.defaultDifficulty !== undefined && schema.defaultDifficulty > 0 ? schema.defaultDifficulty : 50
+  // 兜底目标值：只在"这次判定根本没有属性/技能基准"时使用（例如无规则书的裸骰）。
+  // 绝不能用 `attrPart + modifier > 0` 这类符号判据——那会让属性 0 或负修正
+  // 的角色反而拿到 50 的目标值（属性越低越强，与契约相反）。
+  const hasBasis = basis.attributeValue !== undefined || basis.skillValue !== undefined
+  const underBase = hasBasis
+    ? 0
+    : schema?.defaultDifficulty !== undefined && schema.defaultDifficulty > 0
+      ? schema.defaultDifficulty
+      : 50
   const rollOverTarget =
     direction === 'rollOver'
       ? Number.isFinite(rawDifficulty)
@@ -220,7 +236,9 @@ export function performRoll(request: RollRequest, context: RollContext = {}): Ro
       : 0
   const target =
     direction === 'rollUnder'
-      ? (attrPart + modifier > 0 ? difficultyModifier + attrPart + modifier : underBase + difficultyModifier + modifier)
+      ? hasBasis
+        ? difficultyModifier + attrPart + modifier
+        : underBase + difficultyModifier + modifier
       : rollOverTarget - modifier
   roll.target = target
 
@@ -241,37 +259,49 @@ export function performRoll(request: RollRequest, context: RollContext = {}): Ro
         ? parseDice(request.opposed.expression)
         : spec
     const sided = rollSpec(opposedSpec, rng, schema?.poolTarget)
-    if (typeof request.opposed.value === 'number' && Number.isFinite(request.opposed.value)) {
-      sided.name = opposedName
-      sided.sum = request.opposed.value
-      sided.total = request.opposed.value
-    } else {
-      sided.name = opposedName
-    }
+    sided.name = opposedName
+    /**
+     * 对手的**目标值**：显式给 `value` 时用它（理解为对手的技能/属性值），
+     * 否则与玩家同目标（纯比骰运）。注意 `value` 不再是"对手已掷出的点数"——
+     * 那样写会让双方余量随同一目标值平移，属性在对抗里被完全抵消。
+     */
+    const opponentTarget =
+      typeof request.opposed.value === 'number' && Number.isFinite(request.opposed.value)
+        ? request.opposed.value
+        : target
+    sided.target = opponentTarget
     opposed = sided
-    if (total > sided.total) {
-      outcome = critFailure ? 'critical-failure' : 'success'
+    /**
+     * 对抗比的是「相对各自目标值的余量」，不是裸骰值——否则属性与技能完全不参与
+     * 对抗（旧实现里 dex=0 与 dex=90 的结果一模一样），而工具描述承诺
+     * 「check 按规则书技能表取属性修正」。固定值对手按"它已经掷出这个数"处理，
+     * 目标值沿用同一难度。
+     */
+    const marginOf = (side: RollSide, sideTarget: number): number =>
+      direction === 'rollUnder' ? sideTarget - side.total : side.total - sideTarget
+    const playerMargin = marginOf(roll, target)
+    const oppMargin = marginOf(sided, opponentTarget)
+    margin = playerMargin - oppMargin
+    if (playerMargin > oppMargin) {
       success = !critFailure
-      margin = total - sided.total
-    } else if (total < sided.total) {
-      outcome = critSuccess ? 'critical-success' : 'failure'
-      success = false
-      margin = total - sided.total
+      outcome = critFailure ? 'critical-failure' : critSuccess ? 'critical-success' : 'success'
+    } else if (playerMargin < oppMargin) {
+      success = critSuccess
+      outcome = critSuccess ? 'critical-success' : critFailure ? 'critical-failure' : 'failure'
     } else {
       outcome = 'tie'
-      margin = 0
-      // 平手一律视为「发起者未达成」；差别在结论文案（守方维持现状 / 需重掷 / 交主持裁定）。
       success = false
     }
     const tieRule = schema?.opposedTie ?? 'gm'
+    const face = `${roll.name} ${total}/${target}（余量 ${playerMargin}）vs ${opposedName} ${sided.total}/${opponentTarget}（余量 ${oppMargin}）`
     verdict =
       outcome === 'tie'
         ? tieRule === 'defender'
-          ? `对抗平手（${roll.name} ${total} vs ${opposedName} ${sided.total}）——按规则书，守方维持现状，发起者的行动未达成`
+          ? `对抗平手（${face}）——按规则书，守方维持现状，发起者的行动未达成`
           : tieRule === 'reroll'
-            ? `对抗平手（${roll.name} ${total} vs ${opposedName} ${sided.total}）——按规则书需要重掷或进入下一轮`
-            : `对抗平手（${roll.name} ${total} vs ${opposedName} ${sided.total}）——由主持按剧情裁定僵持结果`
-        : `${roll.name} ${total} vs ${opposedName} ${sided.total}：${outcome === 'success' ? '胜出，行动达成' : '落败，行动被压制'}（差值 ${margin}）`
+            ? `对抗平手（${face}）——按规则书需要重掷或进入下一轮`
+            : `对抗平手（${face}）——由主持按剧情裁定僵持结果`
+        : `${face}：${success ? '胜出，行动达成' : '落败，行动被压制'}（余量差 ${margin}）`
   } else if (direction === 'rollUnder') {
     success = total <= target
     margin = target - total
@@ -350,7 +380,10 @@ export function renderRoll(result: RollResult): string {
   const lines = [head]
   if (result.opposed !== undefined) {
     const oFaces = result.opposed.faces.map((face) => (face.kept ? `${face.value}` : `(${face.value})`)).join(' ')
-    lines.push(`⚔️ 对抗 ${result.opposed.name}：${result.opposed.spec.normalized} → [${oFaces}] = ${result.opposed.total}`)
+    lines.push(
+      `⚔️ 对抗 ${result.opposed.name}：${result.opposed.spec.normalized} → [${oFaces}] = ${result.opposed.total}` +
+        `${result.opposed.target === undefined ? '' : `（目标 ${result.opposed.target}）`}`,
+    )
   }
   lines.push(`结论：${result.verdict}`)
   if (result.difficultyLabel !== undefined) lines.push(`难度档：${result.difficultyLabel}`)

@@ -80,6 +80,33 @@ async function resolveCaller(
   return { sessionId, cwd: info.cwd, store: deps.storeFor(info.cwd) }
 }
 
+/**
+ * 产物落盘路径的职责边界（与 routes.ts 的 artifactRel 同规则）：
+ * 拒绝 `.scorpio/`、拒绝 `..`/绝对路径、要求 `.md`、拒绝落在任何世界书目录内。
+ */
+async function artifactRel(
+  resolved: Resolved,
+  worldId: string,
+  rel: string,
+  fallback: string,
+): Promise<string> {
+  const target = (rel.trim() === '' ? fallback : rel.trim()).replace(/\\+/g, '/').replace(/^\.\//, '')
+  if (target.startsWith('.scorpio/') || target === '.scorpio') {
+    throw new Error('产物不能写入 .scorpio/ 状态目录')
+  }
+  if (target.startsWith('/') || target.split('/').includes('..')) {
+    throw new Error('产物路径不能是绝对路径、也不能包含 ..')
+  }
+  if (!/\.md$/i.test(target)) throw new Error('产物必须是 .md 文件')
+  const current = await resolved.store.world(worldId)
+  if (current !== undefined && current.path !== '') {
+    if (target === current.path || target.startsWith(`${current.path}/`)) {
+      throw new Error(`产物不能写入世界书目录 ${current.path}/（那是玩家的源资料）`)
+    }
+  }
+  return target
+}
+
 /** 取当前世界：优先会话绑定，其次该工作区唯一的那一本。 */
 async function requireWorld(
   resolved: Resolved,
@@ -413,7 +440,6 @@ export function makeAgentTools(deps: ToolDeps): {
             action,
             world: { ...world, files: [] },
             rules: rules.map((rule) => ({ ...rule, selected: rule.id === binding.rulebookId })),
-            text: '',
           }
         }
 
@@ -476,7 +502,7 @@ export function makeAgentTools(deps: ToolDeps): {
           const info = ruleStyleInfo(styleRaw)
           const style: RuleStyle = RULE_STYLES.some((item) => item.id === styleRaw) ? styleRaw : 'custom'
           const title = String(args.title ?? '').trim() || `${world.rulesName ?? world.name}规则书（${style}）`
-          const mdRel = String(args.path ?? '').trim() || `${title}.md`
+          const mdRel = await artifactRel(resolved, worldId, String(args.path ?? ''), `${title}.md`)
           const rule = await store.writeRulebook({
             worldId,
             ...(String(args.rulebookId ?? '').trim() === '' ? {} : { rulebookId: String(args.rulebookId).trim() }),
@@ -769,6 +795,15 @@ export function makeAgentTools(deps: ToolDeps): {
           schemaSkills?: Array<{ id: string; label: string }>
         }
         if (v.ok === false) return text(`错误：${v.error ?? '未知错误'}`)
+        if (v.text !== undefined && v.text !== '') {
+          // 写入/导入路径的说明（含「必须先用 ask_user_question 与玩家确认」）优先于池列表，
+          // 池列表附在其后，避免关键流程提示被吞掉。
+          const pool =
+            v.templates === undefined || v.templates.length === 0
+              ? ''
+              : `\n\n角色池（${v.templates.length} 张）：\n` + v.templates.map((item) => templateLine(item)).join('\n')
+          return text(v.text + pool)
+        }
         if (v.templates !== undefined) {
           return text(
             v.templates.length === 0
@@ -1009,7 +1044,9 @@ export function makeAgentTools(deps: ToolDeps): {
           type: 'object',
           properties: { name: { type: 'string' }, expression: { type: 'string' }, value: { type: 'number' } },
           required: ['name'],
-          description: '对抗判定：{ name: 对手名, expression?: 对手骰式, value?: 对手固定值 }。',
+          description:
+            '对抗判定：{ name: 对手名, expression?: 对手骰式, value?: 对手的目标值（技能值） }。' +
+            '双方各掷一次，比较"相对各自目标值的余量"（rollUnder 余量 = 目标 − 骰值）；value 留空表示与玩家同目标，纯比骰运。',
         },
         action: { type: 'string', description: '这次判定的行动描述。' },
         actor: { type: 'string', description: '行动者：player（默认）或 npc:名字。' },
@@ -1039,8 +1076,13 @@ export function makeAgentTools(deps: ToolDeps): {
             `还没有导入角色卡：先用 ${TOOL_CHARACTER} action=list 挑选、action=select 导入，或用 action=generate 生成一张。`,
           )
         }
-        if (binding.moduleId === undefined) {
-          throw new Error(`还没有选定模组：先用 ${TOOL_MODULE} action=generate 生成一个开场引子，或 action=select 选一个。`)
+        const scene = binding.moduleId === undefined ? undefined : await resolved.store.module(worldId, binding.moduleId)
+        if (scene === undefined) {
+          throw new Error(
+            binding.moduleId === undefined
+              ? `还没有选定模组：先用 ${TOOL_MODULE} action=generate 生成一个开场引子，或 action=select 选一个。`
+              : `绑定的模组「${binding.moduleId}」已不存在：请用 ${TOOL_MODULE} action=list 重新选一个（四元组未齐备前不判定）。`,
+          )
         }
         const request = args as unknown as RollRequest
         if ((request.check === undefined || request.check === '') && (request.expression === undefined || request.expression === '')) {

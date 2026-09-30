@@ -6,7 +6,9 @@
  * 注入为一个 <style> 元素，重复挂载不会重复插入。
  */
 export const SCORPIO_CSS = `
-.sc-root{
+/* 令牌同时挂在面板根与悬浮卡上：悬浮卡渲染在 shell.overlay（与面板并列的另一个
+   子树），不是 .sc-root 的后代，否则 rgba(var(--sc-card-rgb),…) 全部解析失败。 */
+.sc-root,.sc-float{
 --sc-bg:#f4f4f6;--sc-bg2:#e9eaee;--sc-card:#ffffff;--sc-card2:#f3f4f7;--sc-hover:#eef0f4;
 --sc-border:#e1e3e9;--sc-border-strong:#c9ccd5;
 --sc-text:#141519;--sc-dim:#4a5060;--sc-muted:#71778a;
@@ -26,7 +28,7 @@ letter-spacing:-0.004em;
 /* 宿主面板给的是一块普通容器：这里只用 flex 列布局，不声明 100% 高度
    （100% 会在少数宿主布局里算成 0 或撑破父容器），溢出由 .sc-body 自己处理。 */
 display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
-.sc-root[data-theme=dark]{
+.sc-root[data-theme=dark],.sc-float[data-theme=dark]{
 --sc-bg:#0c0c0e;--sc-bg2:#131317;--sc-card:#16161a;--sc-card2:#1c1c21;--sc-hover:#232329;
 --sc-border:#2a2a31;--sc-border-strong:#3b3b45;
 --sc-text:#f2f2f4;--sc-dim:#c3c6cf;--sc-muted:#8b8f9c;
@@ -203,6 +205,8 @@ display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
 .sc-banner .sc-banner-text{flex:1;min-width:0;word-break:break-word}
 
 /* ── 窄面板收口（右侧面板被拖窄时不留溢出、不挤字） ───────────────── */
+/* 需要一个查询容器祖先；此前没有任何元素声明 container-type，整块规则恒不匹配。 */
+.sc-root{container-type:inline-size}
 @container (max-width: 340px){
 .sc-attrs{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}
 .sc-tab{padding:0 9px;font-size:11.5px}

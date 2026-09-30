@@ -48,6 +48,8 @@ export const MAX_EDIT_CHARS = 600_000
 
 export const PRESET_ID = 'scorpio'
 export const PLUGIN_ID = 'dsh-scorpio'
+/** 插件版本：宿主与客户端只读这一份，避免两处常量漂移。 */
+export const VERSION = '0.2.0'
 export const TAB_ID = 'dsh-scorpio'
 export const OVERLAY_ID = 'dsh-scorpio-dice'
 export const DICE_PREFIX = 'scorpio_'
@@ -465,6 +467,7 @@ export interface RollRequest {
   modifier?: number
   reason?: string
   difficulty?: number
+  /** `value` 是**对手的目标值**（技能值）；留空则与玩家同目标。双方比较相对各自目标的余量。 */
   opposed?: { name: string; expression?: string; value?: number }
   action?: string
   actor?: 'player' | 'npc' | string

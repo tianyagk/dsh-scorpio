@@ -5,7 +5,7 @@
  * `.scorpio/` 状态目录）。任何越界（`..`、绝对路径指向外部、符号链接逃逸）
  * 一律拒绝，理由是这些文件会直接进模型上下文与工具写手。
  */
-import { readdir, readFile, realpath, stat } from 'node:fs/promises'
+import { open, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   MAX_BOOK_CHARS,
@@ -185,6 +185,28 @@ export async function stateDirOf(workspace: string): Promise<string> {
   return join(root, STATE_DIR)
 }
 
+/**
+ * 只读文件的前 `maxChars` 个字符（按 UTF-8 字节取整块，再按字符截断）。
+ * 用于避免"先整读再截断"——一个几百 MB 的日志足以把进程顶爆。
+ */
+async function readTextPrefix(abs: string, maxChars: number): Promise<{ text: string; truncated: boolean }> {
+  const handle = await open(abs, 'r')
+  try {
+    const limitBytes = Math.max(1, maxChars) * 4 + 4
+    const buffer = Buffer.allocUnsafe(limitBytes)
+    const { bytesRead } = await handle.read(buffer, 0, limitBytes, 0)
+    let text = buffer.subarray(0, bytesRead).toString('utf8')
+    let truncated = false
+    if (text.length > maxChars) {
+      text = text.slice(0, maxChars)
+      truncated = true
+    }
+    return { text, truncated }
+  } finally {
+    await handle.close()
+  }
+}
+
 async function walk(
   root: string,
   dir: string,
@@ -220,19 +242,32 @@ async function walk(
       continue
     }
     if (size === 0) continue
+    // 符号链接在文件清单里出现过就跟随读取：必须按 realpath 复核归属，
+    // 否则工作区里的软链会把区外文件（密钥、别的项目）读进模型上下文。
+    let real = abs
+    try {
+      real = await realpath(abs)
+    } catch {
+      continue
+    }
+    if (!inside(root, real)) {
+      out.push({ rel: toPosix(relative(root, abs)), chars: 0, truncated: false, error: '符号链接指向工作区外，已跳过' })
+      continue
+    }
     const rel = toPosix(relative(root, abs))
     let text = ''
     let truncated = false
     let error: string | undefined
     try {
-      const raw = await readFile(abs, 'utf8')
-      if (raw.includes('\u0000')) {
+      // 先 stat 过大小：超过上限时只读前缀，别把几百 MB 的文件整读进内存。
+      const raw = await readTextPrefix(real, MAX_FILE_CHARS)
+      if (raw.text.includes('\u0000')) {
         error = '二进制或编码非 UTF-8，已跳过'
-      } else if (raw.length > MAX_FILE_CHARS) {
-        text = raw.slice(0, MAX_FILE_CHARS)
+      } else if (raw.truncated) {
+        text = raw.text
         truncated = true
       } else {
-        text = raw
+        text = raw.text
       }
     } catch (cause) {
       error = `读取失败：${cause instanceof Error ? cause.message : String(cause)}`

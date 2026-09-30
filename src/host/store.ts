@@ -18,6 +18,7 @@
  * `.scorpio/characters/{sid}.json`）**不再被读取**：这是一次不兼容重构，旧文件
  * 保持原样留在磁盘上作为历史痕迹，不会污染新模型。
  */
+import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
@@ -59,30 +60,90 @@ const MAX_STATUSES = 60
 const MAX_ATTRS = 200
 const MAX_SKILLS = 400
 
+/**
+ * 同一路径的写操作串行链。
+ *
+ * 临时文件名此前是 `${file}.tmp-${process.pid}-${Date.now()}`：同进程同毫秒的
+ * 两个并发写会算出**同一个**临时路径，先完成者把它 rename 走，后者随即 ENOENT；
+ * 两个 rename 交错时目标文件还会留下半截 JSON。实测（4 并发 upsert × 8 轮）
+ * 该缺陷把整个世界书索引写坏，此前登记全部消失。因此 tmp 名带随机 UUID，
+ * 且同一路径的写按 Promise 链排队。
+ */
+const writeChains = new Map<string, Promise<unknown>>()
+
+function withPathLock<T>(file: string, task: () => Promise<T>): Promise<T> {
+  const previous = writeChains.get(file) ?? Promise.resolve()
+  const run = previous.then(task, task)
+  writeChains.set(
+    file,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  )
+  return run
+}
+
+/** 读 JSON。解析失败时把坏文件另存为 `*.corrupt-<ts>` 而不是静默当空表。 */
 async function readJson<T>(file: string, fallback: T): Promise<T> {
+  let raw: string
   try {
-    const raw = await readFile(file, 'utf8')
-    if (raw.trim() === '') return fallback
-    return JSON.parse(raw) as T
+    raw = await readFile(file, 'utf8')
   } catch (error) {
     const code = (error as { code?: string }).code
     if (code !== 'ENOENT') log('readJson failed:', file, String(error))
     return fallback
   }
+  if (raw.trim() === '') return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch (error) {
+    const backup = `${file}.corrupt-${Date.now().toString(36)}`
+    try {
+      await rename(file, backup)
+      log(`readJson: ${file} 不是合法 JSON，已备份为 ${backup}（本次返回空表）`, String(error))
+    } catch (renameError) {
+      log('readJson: 坏文件备份失败', String(renameError))
+    }
+    return fallback
+  }
 }
 
-async function writeJson(file: string, value: unknown): Promise<void> {
+/** 无锁写入（仅供已持有该路径锁的事务调用）。 */
+async function writeJsonRaw(file: string, value: unknown): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`
+  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
   await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
   await rename(tmp, file)
 }
 
-async function writeText(file: string, text: string): Promise<void> {
+async function writeTextRaw(file: string, text: string): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`
+  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
   await writeFile(tmp, text, 'utf8')
   await rename(tmp, file)
+}
+
+async function writeJson(file: string, value: unknown): Promise<void> {
+  return withPathLock(file, () => writeJsonRaw(file, value))
+}
+
+async function writeText(file: string, text: string): Promise<void> {
+  return withPathLock(file, () => writeTextRaw(file, text))
+}
+
+/**
+ * 一次「读-改-写」事务：同一路径串行，因此不会丢失并发更新。
+ * 这些索引文件都是 read-modify-write（读一次、改内存、整体覆盖写），
+ * 只在写侧加锁仍是 last-writer-wins——必须把读也放进临界区。
+ */
+async function mutateJson<T>(file: string, fallback: T, fn: (draft: T) => T | Promise<T>): Promise<T> {
+  return withPathLock(file, async () => {
+    const draft = await readJson<T>(file, fallback)
+    const next = await fn(draft)
+    await writeJsonRaw(file, next)
+    return next
+  })
 }
 
 const clamp = (value: string | undefined, max: number): string | undefined => {
@@ -159,18 +220,20 @@ export class ScorpioStore {
 
   /** 载入/刷新一本世界书（同路径视为刷新，保留原 id）。 */
   async upsertWorld(world: World): Promise<World> {
-    const index = await this.worldIndex()
-    const existing = index.worlds.find((item) => item.id === world.id || item.path === world.path)
+    const file = await this.file(join(WORLDS_DIR, 'index.json'))
     let stored = world
-    if (existing !== undefined) {
-      stored = { ...world, id: existing.id }
-      index.worlds = index.worlds.filter((item) => item.id !== existing.id)
-    } else if (index.worlds.some((item) => item.id === stored.id)) {
-      stored = { ...stored, id: this.suggestId(stored.id, index.worlds.map((item) => item.id)) }
-    }
-    index.worlds.push(stored)
-    index.activeId = stored.id
-    await writeJson(await this.file(join(WORLDS_DIR, 'index.json')), index)
+    await mutateJson<WorldIndex>(file, { v: 2, worlds: [] }, (index) => {
+      const existing = index.worlds.find((item) => item.id === world.id || item.path === world.path)
+      if (existing !== undefined) {
+        stored = { ...world, id: existing.id }
+        index.worlds = index.worlds.filter((item) => item.id !== existing.id)
+      } else if (index.worlds.some((item) => item.id === stored.id)) {
+        stored = { ...stored, id: this.suggestId(stored.id, index.worlds.map((item) => item.id)) }
+      }
+      index.worlds.push(stored)
+      index.activeId = stored.id
+      return { ...index, v: 2 }
+    })
     return stored
   }
 
@@ -540,28 +603,32 @@ export class ScorpioStore {
     },
   ): Promise<RunBinding> {
     if (typeof sessionId !== 'string' || sessionId === '') throw new Error('缺少 sessionId')
-    const data = await this.bindings()
-    const current: RunBinding = data.sessions[sessionId] ?? {}
-    const next: RunBinding = { ...current, boundAt: Date.now() }
-    const put = (key: keyof RunBinding, value: string | null | undefined): void => {
-      if (value === undefined) return
-      if (value === null) delete next[key]
-      else (next as Record<string, unknown>)[key] = value
-    }
-    // 换世界时先清掉属于旧世界的选择，避免出现跨世界的四元组。
-    if (patch.worldId !== undefined && patch.worldId !== null && patch.worldId !== current.worldId) {
-      delete next.rulebookId
-      delete next.moduleId
-      delete next.templateId
-    }
-    put('worldId', patch.worldId)
-    put('rulebookId', patch.rulebookId)
-    put('moduleId', patch.moduleId)
-    put('templateId', patch.templateId)
-    if (patch.startedAt !== undefined) next.startedAt = patch.startedAt
-    data.sessions[sessionId] = next
-    await writeJson(await this.file(FILE_BINDING), data)
-    return next
+    const file = await this.file(FILE_BINDING)
+    let result: RunBinding = {}
+    await mutateJson<SessionBindingFile>(file, { v: 2, sessions: {} }, (data) => {
+      const current: RunBinding = data.sessions[sessionId] ?? {}
+      const next: RunBinding = { ...current, boundAt: Date.now() }
+      const put = (key: keyof RunBinding, value: string | null | undefined): void => {
+        if (value === undefined) return
+        if (value === null) delete next[key]
+        else (next as Record<string, unknown>)[key] = value
+      }
+      // 换世界时先清掉属于旧世界的选择，避免出现跨世界的四元组。
+      if (patch.worldId !== undefined && patch.worldId !== null && patch.worldId !== current.worldId) {
+        delete next.rulebookId
+        delete next.moduleId
+        delete next.templateId
+      }
+      put('worldId', patch.worldId)
+      put('rulebookId', patch.rulebookId)
+      put('moduleId', patch.moduleId)
+      put('templateId', patch.templateId)
+      if (patch.startedAt !== undefined) next.startedAt = patch.startedAt
+      data.sessions[sessionId] = next
+      result = next
+      return { ...data, v: 2 }
+    })
+    return result
   }
 
   async unbind(sessionId: string): Promise<boolean> {

@@ -18,7 +18,7 @@ import { log, type PluginContext } from './host/context.ts'
 
 /** bundle-patch 行的插件标识。 */
 export const name = 'dsh-scorpio'
-export const version = '0.2.0'
+export { VERSION as version } from './shared/model.ts'
 
 /** 挂载前必须就绪的服务：webserver 路由。 */
 export const inject = ['webServer']
