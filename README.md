@@ -1,211 +1,162 @@
 # dsh-scorpio（天蝎座 Scorpio）
 
-> **以本文末尾的「v0.2 重构：三条主线」为准。** 顶部以下的前半部分是 v0.1 的写法
-> （旧工具名 `scorpio_rulebook_*`、已不存在的「判定」子页、旧的数据文件与路由表），
-> 保留作为实现演进的记录；当前实现为：三个子页（世界书 / 模组集 / 角色卡）+ 可拖拽
-> 悬浮判定卡 + 8 个工具 + 四元组开局闸门。README 的完整重写待办。
+DeepSeek Harness 的 **Web 插件**：把「天蝎座 Scorpio」装成一套实时推演线上 TRPG（跑团）的主持工具链，并注册成一个 **Agent 预设**（`preset/agent.cordis.yml`，id `scorpio`）。跑在该预设上的会话里，侧边栏多一个 🦂「天蝎座」页签（三个子页），界面上还浮着一张可拖拽的判定卡。
 
-一个 DeepSeek Harness **Web 插件**：为实时推演的线上 TRPG（桌面角色扮演）提供一套完整的主持工具链，并把「天蝎座 Scorpio」注册为一个 **Agent 预设**。使用该预设的会话里，侧边栏会多出一个 🦂「天蝎座」页签，用来导入世界书、查看与编辑规则书、查看与编辑角色信息、掷骰与复盘判定流水。
+插件版本 `0.2.0`：`src/shared/model.ts` 的 `VERSION` 是唯一来源，宿主与浏览器半区共读这一份。
 
-> 与其他会话完全隔离：**只有跑在 Scorpio 预设上的会话**才拥有这些工具与这扇配置窗，别的预设既看不到页签、也调不到工具，宿主侧还会对非 Scorpio 会话直接返回 403。
+> 宿主半区是**进程级**挂载、服务所有会话，所以「只在天蝎座生效」不是靠不装载实现的：每次 `/scorpio/*` 请求都要先判定这个会话的 Agent 预设，不是 `scorpio` 就一律 403；模型工具在工具体内做同一道判定。别的预设既没有这行插件，也没有这段主持提示词。
 
-## 功能
+## 概念模型：三条主线 + 判定
 
-### 一、世界书（载入 / 查看 / 切换 / 移除）
-- 载入**当前工作区内任意目录**的全部文本文件（`.md` `.txt` `.json` `.yaml` `.csv` 等，递归扫描，自动跳过 `node_modules`/`.git`/产物目录）；一个工作区可以存多本世界书并随时切换绑定。
-- 扫描结果同时给两边：界面拿到清单（点文件名可展开预览），会话里的模型拿到全文（用于生成规则书）。
-- 大目录可勾选「只登记清单」，避免把整库塞进上下文。
-
-### 二、规则书（`{世界书名称}规则书.md`）
-- 由 Agent 阅读世界观后撰写，经 `scorpio_rulebook_write` 落盘到工作区可读可改的 md 文件，同时在 `.scorpio/` 留一份副本。
-- 与正文一起写入**机器可读 schema**：系统名、基础骰式、判定方向（低骰/高骰成功）、难度阶梯、大成功/大失败区间、属性表、技能表、状态系统、判定原则。
-- 页签内可**就地编辑**正文与 schema 并保存；schema 一变，角色卡会自动按新属性/技能表重建（保留已有取值，新条目标为「待确认」）。
-
-### 三、角色信息（规则书驱动，随规则书动态渲染）
-- 分区：身份（角色名 / 概念）、**属性**（按 schema 分组渲染）、**技能**、**物品**、**队友**、**宠物**、**随从**、**状态**（带持续回合与增益/减益）、**经历与线索**、自由备注。
-- 硬性顺序：**先载入世界书 → 生成规则书 → 由 Agent 依据世界观与规则书用问询（`ask_user_question`）逐项与玩家确认**，确认结果才写入角色卡；无默认值的属性一律带「待确认」标记，页签高亮提示，不替玩家拍板。
-- 玩家与 Agent 双向同源：页签里手改即写入明文 JSON，Agent 在会话里更新后会随轮询同步到页签。
-
-### 四、骰子判定（判定先行）
-- 通用骰：`NdM±K`、`d%`、`4d6kh3`（取高/取低）。
-- 命名检定：按规则书技能表自动取属性 + 技能修正。
-- **难度语义**（与规则书 `difficultyLadder` 一致）：
-  - `direction: rollUnder`（低骰成功）→ 目标值 = **属性 + 技能 + 难度修正 + 临时修正**，阶梯的 `value` 是修正值（`-50 近乎奇迹` … `+40 显而易见`，缺省 0）；
-  - `direction: rollOver`（高骰成功）→ 目标值 = **难度（绝对阈值）− 临时修正**，缺省用 `defaultDifficulty`。
-- 大成功/大失败 + 差值（margin）+ 难度档标签 + 一句话可引用结论。
-- **对抗判定**：双方各掷一次（对手也可用固定值），潜行 vs 侦查、擒抱 vs 挣脱、谎言 vs 洞察。
-- 每一次判定都追加写入 `{工作区}/.scorpio/dice.jsonl`（append-only，可用 `scorpio_ledger` 或页签「判定」子页复盘），系统提示词明确要求：**任何影响剧情的重要行动（玩家角色与 NPC）都必须先判定再叙事**。
-
-## 安装
-
-前置：本机 web profile 已挂载 `dsh-better-sidebar`（提供 `ctx.betterSidebar`；缺失时页签不会出现，其余功能不受影响）。
-
-```bash
-cd dsh-scorpio
-npm install            # 首次：装 esbuild/typescript（也可复用同机其它插件的 node_modules）
-npm run build          # → lib/index.js + lib/client.js
-npm run selftest       # 69 项单元自测 + 35 项路由集成自测（不碰真实档案）
-
-bash scripts/install.sh                 # 默认写 ~/.dsh/profiles/web 与 ~/.dsh/.agent-presets/scorpio
-# 或: bash scripts/install.sh <profile-dir> <project-dir>
-
-# 重启 dsh web 进程（必须：客户端 bundle 在启动时装载），然后刷新页面
+```
+【世界书】工作区里的一个资料目录（递归扫描其中的全部文本）
+   └─ 规则书 ×N    同一个世界可以有多套不同风格：d100 / d20 / d6 骰池 / 自定义
+【模组集】某个世界下的一个个「开场引子」：从哪一幕开始、关键 NPC、悬念与走向
+【角色卡】按世界组织、可复用的角色池；一次冒险把其中一张导入成正在扮演的角色
+【判定】  任何有失败可能、且失败有意义的行动，都先掷骰再叙事
 ```
 
-安装脚本做四件事：构建两侧产物 → 以 `link:` 形式把 `dsh-scorpio` 写进 profile 依赖与 `dsh.profile.bundles` → `pnpm install` → 把 `preset/` 复制到 `${DSH_HOME:-~/.dsh}/.agent-presets/scorpio`（已存在则先备份为 `scorpio.bak-<时间戳>`，**绝不覆盖 shipped 的 standard/code/minimal/cordis 预设**）。若 profile 侧解析不到包名，脚本会自动把预设里的插件行改写为指向本仓库 `lib/index.js` 的绝对 `file:` 行。
+每次冒险（会话）是一个**四元组**：`世界书 + 规则书 + 模组 + 角色卡`。四者齐备前不进入叙事——`scorpio_run` / `scorpio_status` 报告还缺哪一环，`scorpio_roll` 直接拒绝判定。开局顺序固定为 **世界书 → 规则书 → 模组 → 角色卡 →（`scorpio_run action=start`）开演**。
 
-卸载：`bash scripts/uninstall.sh [profile-dir] [--keep-preset]`（不动工作区里的 `.scorpio/` 与规则书 md）。之后同样需要重启 web 进程。
+判定只分叉在「方向」上，其余共用一套语义：`rollUnder`（低骰成功）的目标值 = 属性 + 技能 + 难度修正 + 临时修正；`rollOver`（高骰成功）的目标值 = 难度（绝对阈值）− 临时修正；d6 骰池则把「骰面 ≥ `poolTarget` 的个数」当成功数去比。对抗判定双方各掷一次，比较**各自相对目标的余量**（`opposed.value` 是**对手的目标值**，留空表示与玩家同目标、纯比骰运）。命名检定按规则书 `skills[].attribute` 自动取属性与技能修正；大成功 / 大失败由 schema 的 `critSuccess` / `critFailure` 区间判定。
 
-## 使用流程
+## 三套规则风格（`style`）
 
-1. 新建会话 →「Agent 预设」选 **天蝎座 Scorpio** → 侧边栏出现 🦂「天蝎座」页签。
-2. 页签 →「世界书」填入工作区内的设定目录（如 `worldbook/克苏鲁`）→ **载入并绑定**。
-3. 在会话里说：「按世界书生成规则书」——Agent 会用 `scorpio_rulebook_write` 写出 `{世界书名称}规则书.md`。
-4. Agent 会依规则书向你**逐项提问**（想演什么样的人、属性分配、技能取向、初始物品、队友/宠物/随从）；确认后角色卡出现在页签「角色信息」里。
-5. 开演：任何有失败可能的行动，Agent 都会先 `scorpio_roll`，并把骰面、难度、成败与代价讲清楚；你可以在页签「判定」里看到同一份流水，也可以自己掷一次比对。
+| style | 手感 | 默认骨架（`RULE_STYLES`） |
+| --- | --- | --- |
+| `d100` | 骰值 1–100 线性均匀，每一档修正都看得见；颗粒度细、要核对属性与技能、节奏偏慢，适合调查 / 扮演 / 恐惧与代价主题 | `1d100` 低骰成功；阶梯是**修正值**：近乎奇迹 -50 … 普通 0（缺省）… 显而易见 +40 |
+| `d20` | 骰值 1–20 颗粒度粗、细微差异容易被淹没；加值随等级线性增长、DC 同步抬升形成等级膨胀，适合英雄奇幻与战术战斗 | `1d20` 高骰成功；阶梯是**绝对阈值**：轻松 8 / 普通 12（缺省）/ 困难 16 / 极难 20 / 近乎不可能 25 |
+| `d6pool` | 多枚 d6 组成骰池，成功数呈钟形分布：中间区间影响最大、极端区间影响小，结果更可预期、少翻车，能表现「能力越强越稳定」，代价是统计稍繁琐 | `4d6`，`poolTarget: 5` → 骰面 ≥ 5 记一个成功，结算比**成功数**，缺省难度 2 |
+| `custom` | 按世界观现场裁量，但骰式、方向、难度与结算都必须写进 schema 与正文 | `2d6` 高骰成功，缺省阈值 8 |
 
-页签顶部有一条步骤指示（世界书 → 规则书 → 角色卡 → 推演中），任何时候都能一眼看出卡在哪一步；会话里也可以让 Agent 调 `scorpio_status` 自检。
+schema 的其余部分由模型按世界书写：属性表、技能表、难度阶梯、大成功/大失败区间、状态系统（`statusSystem`）、平手裁定（`opposedTie: defender | reroll | gm`，缺省 `gm`）。同一本世界书可以并存多套规则，会话里随时切换。
 
-## 模型工具
+## 界面
+
+- **三个子页**：**世界书**（规则书作为它的子项折叠在下面，同一世界的多套规则可「选用」；世界书里的源文件是只读预览）、**模组集**（可从列表挑选，也可以手写 / 套骨架后保存一个模组）、**角色卡**（角色池 + 会话中正在扮演的那张；属性与技能按 schema 渲染，`pending` 的项标「待确认」，点一下即确认）。
+- **悬浮判定卡**：注册在 `ctx.slots` 的 `shell.overlay` 上（frame-wide 浮层），可拖拽、可折叠成一个 🎲 圆钮，位置按会话记在 `localStorage`；底色不透明度 0.35–1.00 可调（默认 0.82）。命名检定 / 骰式 / 难度 / 对抗都在这一张卡上掷。
+- **判定没有独立子页**：它是贯穿整场推演的底层能力，所以做成常驻浮层，而不是第四个页签。
+- **面板解锁只看预设**：页签的 `available` 谓词只问「当前会话选的 Agent 预设是不是天蝎座」，与世界书 / 规则书 / 模组 / 角色卡是否就绪**完全无关**；那四样只决定「能不能开演」（面板顶部与提示条会写明「开局序章未齐 · 面板已解锁」）。预设已被删除的会话也保留入口，点进去看到的是修复说明。
+- 面板每 8 秒轮询一次 snapshot；页签角标是**待玩家确认的属性条数**，每 20 秒刷新一次。
+
+## 模型工具（7 个）
 
 | 工具 | 作用 |
 | --- | --- |
-| `scorpio_status` | 自检：会话 / 预设 / 工作区 / 世界书 / 规则书 / 角色卡 / 流水与下一步提示 |
-| `scorpio_worldbook` | `load` 载入并绑定目录全文 · `list` · `read` 取某本全文 · `bind` 切换 · `find` 关键词检索 · `remove` |
-| `scorpio_rulebook_write` | 写规则书 md + 机器可读 schema（同时重建角色卡条目；回报缺失字段与阶梯形态提醒） |
-| `scorpio_rulebook_read` | 读规则书正文与 schema |
-| `scorpio_character` | `get` 读角色卡 · `update` 增量补丁（属性/技能按 id upsert、物品/队友/宠物/随从、状态、经历） |
-| `scorpio_roll` | 判定的唯一入口：通用骰 / 命名检定 / 难度 / 对抗 / 大成功大失败 |
+| `scorpio_worldbook` | 世界书 **及其规则书**：`load`（扫描并绑定）`list` `read` `bind` `find` `remove`；`write_rulebook`（正文 + 机器可读 schema，同一世界可多套）`list_rules` `read_rulebook` `select_rulebook` `remove_rulebook` |
+| `scorpio_module` | 开场引子：`generate` `list` `read` `select` `save` `remove`（`generate` / `save` 需要模型给出 markdown——工具只负责落盘与登记） |
+| `scorpio_character` | 角色池与会话角色：`list`（角色池）`generate`（依世界 + 规则 + 模组生成候选，默认不直接开演）`select`（导入本会话）`get` `update`（属性 / 技能按 id upsert，物品 / 队友 / 宠物 / 随从 / 状态 / 经历合并）`save` |
+| `scorpio_roll` | 判定唯一入口：通用骰、命名检定、难度、对抗、大成功/大失败；结果自动写入流水 |
 | `scorpio_ledger` | 判定流水复盘（可按关键词过滤） |
+| `scorpio_run` | 四元组总控：`get` / `set` / `start` |
+| `scorpio_status` | 自检：会话、预设、工作区、世界书、该世界的规则书、模组、角色卡、流水与下一步 |
 
-七个工具在**工具体内**再次校验当前会话的预设，因此即使有人在别的预设里手工拼出工具名，也拿不到数据、写不进文件。
+工具只在 Scorpio 预设下可用；四元组未齐备时 `scorpio_roll` 会指出缺哪一环，而不是硬算。
 
-## 数据文件（明文 JSON，可离线复盘）
+## 开局四元组流程
 
-都以会话 cwd 为根，路径围栏拒绝任何越界（`..`、绝对路径、符号链接逃逸）：
+1. **世界书**：`scorpio_worldbook action=load path=<工作区内的目录>` → 递归扫描文本文件并绑定到本会话；大目录可用 `listOnly` 只登记清单。目录里一个文本文件都没有会被拒绝。
+2. **规则书**：`action=write_rulebook`，必须同时给 `markdown` 与 `schema`（含属性表、技能表、判定公式、难度阶梯、大成功/大失败、状态系统）；写完用 `action=list_rules` 让玩家挑，`action=select_rulebook` 切换。
+3. **模组**：`scorpio_module action=generate` 写出开场引子（一句话钩子 / 序幕与初始局面 / 关键 NPC / 悬念与走向 / 首场判定提示），也可以用 `action=list` 从已有模组里挑。
+4. **角色卡**：`scorpio_character action=generate` 依「世界 + 规则 + 这个模组」把候选写进角色池；用 `ask_user_question` 让玩家在候选之间挑选并逐项确认（姓名/概念、属性分配、技能取向、初始物品、队友/宠物/随从、开场处境）；`action=select templateId=…` 导入本会话。属性 / 技能 id 必须来自规则书 schema，未确认的保留 `pending`。
+5. **开演**：`scorpio_run action=start`（四元组不齐备会被拒绝），然后从模组的第一幕开始；此后每次重要行动先 `scorpio_roll`。
 
-| 文件 | 内容 |
-| --- | --- |
-| `.scorpio/worldbooks.json` | 世界书索引（清单，不含全文） |
-| `.scorpio/session.json` | 会话 → 世界书绑定 |
-| `.scorpio/rules/{bookId}.json` | 规则书元数据 + 机器可读 schema |
-| `.scorpio/rules/{bookId}.md` | 规则书副本（原件是工作区根下的 `{书名}规则书.md`） |
-| `.scorpio/characters/{sessionId}.json` | 玩家角色卡 |
-| `.scorpio/dice.jsonl` | 判定流水（append-only，每行一次完整判定） |
+## 数据文件
+
+状态都落在工作区的 `.scorpio/` 明文 JSON 里，玩家可以直接读改：
+
+```
+.scorpio/worlds/index.json                 世界书（清单 + 文件表）
+.scorpio/rules/index.json                  规则书，按世界分组 { worldId: [Rulebook…] }
+.scorpio/modules/index.json                模组集，按世界分组
+.scorpio/characters/index.json             角色池，按世界分组
+.scorpio/characters/instances/{sid}.json   会话中正在扮演的角色卡
+.scorpio/session.json                      会话 → 四元组 { v:2, sessions: { <sid>: { worldId, rulebookId, moduleId, templateId } } }
+.scorpio/dice.jsonl                        判定流水（append-only，每行 { v:1, entry:{…} }）
+```
+
+写盘是原子替换（同目录临时文件 + `rename`，临时名带随机 UUID），同一路径的写按 Promise 链串行；读取遇到坏 JSON 会先把它备份成 `*.corrupt-<时间戳>`，再当空表处理（不会静默丢文件）。
+
+工作区里另有玩家可见的产物：规则书 `<书名>规则书（<style>）.md`（书名取 `world.rulesName ?? world.name`），模组 `modules/<模组名>.md`。产物路径受职责边界约束——拒绝 `.scorpio/`、拒绝 `..` 与绝对路径、必须是 `.md`、且不许落在任何已登记的世界书目录内（那里是玩家的源资料），越界返回 400。
 
 ## HTTP 路由
 
-同源、浏览器信任围栏（loopback 或部署信任主机）之后，写操作还要求同源 `Origin`；非 Scorpio 会话一律 403。
+所有路由都在浏览器信任围栏之后：`Host` 必须是 loopback 或部署信任的主机，带 `sec-fetch-site: cross-site` 的请求直接拒绝；**写操作**（POST）额外要求 `Origin` 与 `Host` 同源；会话不属于天蝎座预设一律 403；会话没有工作区则 409。
 
-```
-GET  /scorpio/health
-GET  /scorpio/whoami?sessionId=
-GET  /scorpio/snapshot?sessionId=
-GET  /scorpio/worldbook[?bookId=&text=1]      POST /scorpio/worldbook   {action:load|bind|rename|remove}
-GET  /scorpio/worldbook/file?bookId=&rel=
-GET  /scorpio/rulebook                        POST /scorpio/rulebook
-GET  /scorpio/character                       POST /scorpio/character
-GET  /scorpio/dice?limit=                     POST /scorpio/dice
+| 路径 | 方法 | 说明 |
+| --- | --- | --- |
+| `/scorpio/health` | GET | 插件名 / 版本 / 预设 id |
+| `/scorpio/whoami` | GET `?sessionId=` | 会话的预设与 cwd（页签与悬浮卡据此决定是否渲染；对未知会话也作答，`scorpio:false`） |
+| `/scorpio/snapshot` | GET `?sessionId=` | 三个子页 + 悬浮卡一次拉齐（世界 / 规则 / 模组 / 角色池 / 流水 / 四元组） |
+| `/scorpio/world` | GET / POST | GET 取世界书（`?text=1` 重新扫描并带全文）；POST `action=load` `bind` `rename` `remove` |
+| `/scorpio/world/file` | GET `?worldId=&rel=` | 读世界书里的单个文本（只读；`rel` 必须在该世界书清单内） |
+| `/scorpio/rulebook` | GET / POST | GET 列表 + 选中那套的正文；POST 写一套（给 `rulebookId` 即覆盖），默认选为当前会话规则并重建会话角色卡 |
+| `/scorpio/module` | GET / POST | GET 列表 + 正文；POST 写一个，或 `action=select` / `action=remove` |
+| `/scorpio/character` | GET / POST | GET 会话中正在扮演的角色卡；POST 写池子或写会话实例（未提供的字段不会覆盖已存值） |
+| `/scorpio/pool` | GET / POST | GET 角色池；POST `action=remove` 删一张 / `action=import` 导入本会话 |
+| `/scorpio/run` | GET / POST | GET 四元组与还缺哪几环；POST 设置四元组（给 `templateId` 会顺手把那张模板导入为会话角色） |
+| `/scorpio/dice` | GET / POST | GET 判定流水（默认尾部 60 条，最多 200）；POST 掷骰，结果追加到流水 |
+
+## 安装 / 卸载 / 验证
+
+前置：web profile 已挂载 `dsh-better-sidebar`（页签的落脚点，缺失时页签不出现、其余功能不受影响），且本目录已 `npm install`。
+
+```bash
+cd dsh-scorpio
+npm install
+bash scripts/install.sh                 # 默认写 ~/.dsh/profiles/web 与 ${DSH_HOME:-~/.dsh}/.agent-presets/scorpio
+# 或: bash scripts/install.sh <profile-dir> <project-dir>
 ```
 
-## 结构
+`install.sh` 做四件事：① `node build.mjs` 构建两侧产物；② 以 `link:` 把 `dsh-scorpio` 写进 profile 依赖并追加到 `dsh.profile.bundles`；③ `pnpm install --no-frozen-lockfile`；④ 把 `preset/` 整目录复制到 `.agent-presets/scorpio`（已存在则先备份成 `scorpio.bak-<时间戳>`，并把目录 / 文件权限收紧到 700 / 600），**绝不会覆盖 shipped 的预设**。
 
+预设里的插件行默认写包名 `dsh-scorpio`；但预设的 mount 用 ESM 解析裸包名，而预设目录之上没有能提供该包的 `node_modules` 祖先——脚本因此会从预设目录做一次同方式的 ESM 探测，失败就把那一行改写成指向本仓库 `lib/index.js` 的绝对 `file:` 行（整目录复制后依然有效）。
+
+安装 / 卸载后**必须重启 dsh web 进程**（客户端 bundle 在进程启动时装载），然后刷新页面，新建会话并在「Agent 预设」里选「天蝎座 Scorpio」。
+
+```bash
+bash scripts/verify-live.sh             # 默认 http://127.0.0.1:3080
+bash scripts/uninstall.sh [profile-dir] [--keep-preset]
 ```
-dsh-scorpio/
-  package.json          dsh.bundle.patch + dsh.client.platform=web（双面插件清单）
-  cordis.patch.yml      insert 一行: id: scorpio / name: 'dsh-scorpio'
-  build.mjs             esbuild → lib/index.js（ESM, node） + lib/client.js（CJS + __ModuleLoader__ 工厂）
-  src/shared/model.ts   两端共享契约（世界书 / 规则 schema / 角色卡 / 骰子 / 路由载荷）
-  src/index.ts          宿主半区入口：路由 + 工具 + 提示词
-  src/host/context.ts   DSH 服务的结构化「面」（不依赖 monorepo 内部类型）
-  src/host/fence.ts     浏览器信任围栏
-  src/host/worldbook.ts 工作区解析、会话 cwd/预设解析、世界书扫描、路径围栏
-  src/host/store.ts     .scorpio 明文存储（原子写、schema 重建、流水追加）
-  src/host/dice.ts      骰式解析 + 判定引擎（纯函数，随机源可注入）
-  src/host/routes.ts    /scorpio/* 路由
-  src/host/tools.ts     七个模型工具 + 天蝎座主持提示词段
-  src/host/selftest.ts  单元自测   src/host/routetest.ts 路由集成自测
-  src/client/           betterSidebar 页签：index / api / useScorpio / Worldbook / Rules / Character / Dice / ui / styles
-  preset/               Agent 预设源（agent.cordis.yml + preset.yml + skills/trpg-gm）
-  scripts/              install.sh / uninstall.sh
-```
+
+`verify-live.sh` 检查五件事：`/scorpio/health` 返回宿主 JSON（而不是 SPA 回退）、`whoami` 对未知会话正常作答、`snapshot` 对未知会话 403（闸门在工作）、`__DSH_BOOT__` 里含 `dsh-scorpio` 与 `dsh-better-sidebar`。卸载只摘 profile 依赖与（默认）预设目录，**不动**工作区里的 `.scorpio/`、规则书 md 与模组 md。
 
 ## 开发
 
 ```bash
-npm run build          # 两侧产物
-npm run typecheck      # tsc --noEmit
-npm run selftest       # 单元 + 路由集成自测
+npm run build         # esbuild → lib/index.js（ESM, node）+ lib/client.js（CJS + __ModuleLoader__ 信封）
+npm run typecheck     # tsc --noEmit -p tsconfig.json
+npm run selftest      # 五个套件：单元 + /scorpio/* 路由 + 客户端 markdown 解析 + 预设回归 + 预设解析探针
+npm test              # 只跑单元自测
+npm run test:routes   # 只跑路由自测
+npm run test:preset   # 只跑预设回归
+npm run test:markdown # 只跑客户端 markdown 解析自测
 ```
 
-客户端与宿主之间只有同源 JSON；浏览器里 `react` / `react-dom` 由 web shell 的冻结模块表提供（esbuild externals），其余全部内联。
+- `src/shared/model.ts` 是两端共享契约，全部是**无损 JSON** 类型：要么落成工作区明文文件，要么跨 `/scorpio/*` 传给浏览器，绝不引入 Node 或 DSH 运行时对象。
+- `src/client/markdown.ts`（规则书 / 模组正文的渲染解析）刻意不 import react，这样它能像宿主模块一样被 node 原生跑测试；渲染层 `ui.tsx` 只是引用它。
+- 客户端 bundle 里 `react` / `react-dom` / `cordis` 是 esbuild externals（由 web shell 的冻结模块表提供），其余全部内联。
+- 其余结构与 UI 细节以源码为准：`src/host/`（路由 / 存储 / 判定 / 工具）、`src/client/`（页签与悬浮卡）。
 
-## 已知边界
+## 已知边界与限制
 
-- 宿主半区是**进程级**挂载（bundle 行），因此它对所有会话都激活；「只在天蝎座生效」由每次请求的预设判定与工具体内的校验实现，而不是靠不装载。
-- 预设是 standard 的**快照副本**，升级 dsh 不会自动更新它；需要新能力时对照新版 `standard/agent.cordis.yml` 手工同步。
-- 规则书与角色卡的「一致性」由 Agent 保证（schema 决定渲染与判定取值）；页签只做结构性校验（未知属性/技能 id 会被拒绝），不做语义审核。
-- 世界书扫描按扩展名与 UTF-8 判定文本：二进制、非 UTF-8 编码（如 GBK）文件会被跳过并在清单里标注原因。
-- 判定使用 `crypto.randomInt`（无模偏）；`rngSource` 字段区分系统随机源与确定性随机源，便于复盘时区分真实掷骰与重放。
-- 插件不构成任何形式的规则版权声明：世界书与规则书内容由你提供/生成，请自行确认使用授权。
+- **面板解锁只看预设**，与初始化完成度无关：会话一开就能打开三个子页（世界书源文件是只读预览，模组与角色卡可编辑），四元组只影响「能不能开演」。预设被删除的会话保留入口，点进去看到的是修复说明而不是空白页。
+- **两个挂载点是两个不同的东西**：页签走 `ctx.betterSidebar`（客户端声明 `inject: ['betterSidebar']`），悬浮判定卡走 `ctx.slots` 的 `shell.overlay`；`slots` 服务缺失时只有判定卡不出现，页签照常可用。
+- **跨会话并发写同一索引是 last-writer-wins**：`worlds/index.json` 与 `session.json` 已事务化（读-改-写进同一把路径锁）；`rules` / `modules` / `characters` 三个索引仍是「读一次 → 整体覆盖写」，两个会话同时写同一个索引会丢其中一侧的更新。
+- **换规则书 / 换世界会剔除属性与技能且无备份**：按新 schema 重建角色卡时，不在新 schema 里的属性、技能被过滤掉，值一并丢弃，没有备份文件；新条目以 `pending` 标「待确认」。换世界还会清掉属于旧世界的规则书 / 模组 / 角色卡选择，避免出现跨世界的四元组。
+- **自动化覆盖不对称**：`/scorpio/*` 由 `src/host/routetest.ts` 用假 ctx 直接驱动真实 handler 覆盖（预设闸门、产物边界、写入语义、请求形状）；客户端能自动测到的只有不 import react 的 markdown 解析器（`src/client/markdowntest.ts`），三个子页与悬浮判定卡本身仍没有自动化测试，只能靠 `scripts/verify-live.sh` 与手测。
+- **`lib/` 不入库**（见 `.gitignore`）：clone 后必须 `npm install` + `npm run build`，否则 profile 里那一行解析不到产物；`scripts/install.sh` 在缺 `node_modules` 时会直接退出。
+- 宿主半区进程级挂载、对所有会话激活，「只在天蝎座生效」由请求级预设判定与工具体内校验实现，不是靠不装载。
+- 预设是 standard 的快照副本（另外附一份 `trpg-gm` 主持手法 skill）：升级 dsh 不会自动同步它，需要新能力时得手工对照新版 `standard/agent.cordis.yml`。
+- 世界书扫描按扩展名与 UTF-8 判定：二进制 / 非 UTF-8 文件被跳过并在清单里标注原因；单文件截断在 240,000 字符、整本 1,200,000 字符、最多 600 个文件、最深 6 层；符号链接指向工作区外的一律跳过。
+- `presettest` 不是纯离线单测：它用本机 dsh 安装里的 YAML 方言解析预设，并读 profile 路径（可用 `SCORPIO_PROFILE` / `SCORPIO_PRESET` 覆盖）。
+- 判定随机源是 `crypto.randomInt`（无模偏）；`rngSource` 区分 os / seeded，便于复盘时分辨真实掷骰与重放。
+- 插件不附带任何规则版权内容：世界书、规则书、模组都是你提供或生成的工作区文件。
+
+## 历史
+
+v0.1 → v0.2 是一次**不兼容重构**：`scorpio_rulebook_write` / `scorpio_rulebook_read` 两个工具名已并入 `scorpio_worldbook` 的 action；侧边栏的「判定」子页已移除，判定改为 `shell.overlay` 上的悬浮卡。旧数据文件 `.scorpio/worldbooks.json`、`.scorpio/rules/{bookId}.json`、`.scorpio/characters/{sid}.json` 与旧路由 `/scorpio/worldbook` **不再被读写**；旧文件原样留在磁盘上作为历史痕迹，不做清理。
 
 ## License
 
 MIT
-
----
-
-## v0.2 重构：三条主线
-
-天蝎座的能力被拆成三条主线，**规则书降级为世界书的派生产物**：
-
-```
-【世界书】corpus/ 之类的世界观资料目录
-   └─ 规则书 ×N   同一本世界书可以有多套不同风格的规则
-【模组集】该世界下的一个个「开场引子」→ modules/{模组名}.md
-【角色卡】按世界组织、可复用的角色池 → 一次冒险导入其中一张
-```
-
-每次冒险（会话）是一个**四元组**：`世界书 + 规则书 + 模组 + 角色卡`。四者齐备前不进入推演，
-`scorpio_run` / `scorpio_status` 会报告还缺哪一环，`scorpio_roll` 会拒绝判定。
-
-### 三套规则风格（同一个世界可以各来一套）
-
-| style | 手感 | 默认骨架 |
-|---|---|---|
-| `d100` | 1–100 线性均匀、颗粒度细、核对属性与技能加成、节奏偏慢，适合调查/扮演/恐惧与代价 | `1d100` 低骰成功，阶梯为修正值（-50…+40） |
-| `d20` | 1–20 颗粒度粗、加值随等级线性增长、DC 随等级膨胀，适合英雄奇幻 / 战术战斗 / 升级成长 | `1d20+5` 高骰，阶梯为绝对阈值 |
-| `d6pool` | 多枚 d6 钟形分布、中间区间影响最大、结果可预期、能力越强越稳定 | `5d6`，`poolTarget: 5` → 结算比较**成功数** |
-
-### UI
-
-侧边栏「天蝎座」页签只保留 **三个子页**：**世界书**（规则书作为它的子项折叠在下面）、**模组集**、**角色卡**。
-判定不再占一个页签，而是 `shell.overlay` 上的**可拖拽悬浮卡**（🎲 可折叠成圆钮，位置按会话记忆），
-随时可以自己掷一次——判定是贯穿整场推演的底层能力。
-
-### 工具面（8 个）
-
-| 工具 | 作用 |
-| --- | --- |
-| `scorpio_status` | 自检：世界书 / 规则书 / 模组 / 角色池 / 四元组进度 / 流水 |
-| `scorpio_worldbook` | `load` `list` `read` `bind` `find` `remove` + **`write_rulebook`（带 style）** `list_rules` `read_rulebook` `select_rulebook` `remove_rulebook` |
-| `scorpio_module` | `generate`（开场引子）`list` `read` `select` `save` `remove` |
-| `scorpio_character` | `list`（角色池）`generate`（依世界+规则+模组生成候选）`select`（导入本会话）`get` `update` `save` |
-| `scorpio_roll` | 判定（需四元组齐备） |
-| `scorpio_ledger` | 判定流水复盘 |
-| `scorpio_run` | 四元组：`get` / `set` / `start` |
-
-### 数据文件（v0.2）
-
-```
-.scorpio/worlds/index.json                 世界书
-.scorpio/rules/index.json                  规则书 { worldId: [Rulebook…] }
-.scorpio/modules/index.json                模组集 { worldId: [Module…] }
-.scorpio/characters/index.json             角色池 { worldId: [CharacterTemplate…] }
-.scorpio/characters/instances/{sid}.json   会话中正在扮演的角色卡
-.scorpio/session.json                      会话 → 四元组
-.scorpio/dice.jsonl                        判定流水
-```
-
-> v0.1 的旧结构（`.scorpio/worldbooks.json`、`.scorpio/rules/{bookId}.json`、`.scorpio/characters/{sid}.json`）
-> **不再被读取**，旧文件原样留在磁盘上作为历史痕迹。旧工具名（`scorpio_rulebook_*`）已移除。
