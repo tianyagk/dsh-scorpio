@@ -52,18 +52,46 @@ export interface SessionHeaderFace {
   agentPreset?: string
 }
 
+/** 会话事件里我们关心的字段。 */
+export interface PluginSessionEvent {
+  type?: string
+  data?: { agentPreset?: string }
+}
+
+/** `ctx.sessionQuery.observeSession()` 的观察租约（结构子集）。 */
+export interface PluginSessionObservation {
+  header: SessionHeaderFace
+  inheritedEventCount?: number
+  events?: PluginSessionEvent[]
+}
+
 /** `ctx.sessionQuery.readSession()` 的结构面。 */
 export interface PluginSessionQuery {
   readSession(sessionId: string): Promise<{
     session: SessionHeaderFace
-    events: Array<{ type?: string; data?: { agentPreset?: string } }>
+    events: PluginSessionEvent[]
   }>
+  /**
+   * 观察租约：宿主内部用 detached restore 重建会话，seeded 会话同样安全。
+   * 新版宿主才提供，故为可选能力，用前判空。
+   */
+  observeSession?(
+    sessionId: string,
+    options?: { projectionMode?: 'none' | 'all' },
+  ): Promise<PluginSessionObservation>
 }
 
-/** `ctx.sessions` 的结构面（内存态会话，兜底来源）。 */
+/** `ctx.sessions` 的结构面（内存态会话，首选来源）。 */
+export interface PluginSessionFace {
+  id?: string
+  header?: SessionHeaderFace
+  /** 完整日志的只读快照（`Session.snapshotEvents`）。 */
+  snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): PluginSessionEvent[]
+}
+
 export interface PluginSessions {
-  get(id: string): { id?: string; header?: SessionHeaderFace } | undefined
-  list(): Array<{ id?: string; header?: SessionHeaderFace }>
+  get(id: string): PluginSessionFace | undefined
+  list(): PluginSessionFace[]
 }
 
 /** `ctx.agentPresets` 的结构面（只读用）。 */

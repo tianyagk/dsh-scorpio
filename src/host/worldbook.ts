@@ -17,7 +17,13 @@ import {
   isTextFile,
   type WorldbookFile,
 } from '../shared/model.ts'
-import { log, type PluginContext } from './context.ts'
+import {
+  log,
+  type PluginContext,
+  type PluginSessionEvent,
+  type PluginSessionObservation,
+  type SessionHeaderFace,
+} from './context.ts'
 
 /** 一次扫描的结果。 */
 export interface ScanResult {
@@ -40,30 +46,62 @@ export class PathFenceError extends Error {
 
 const toPosix = (p: string): string => p.split(sep).join('/')
 
-/** 会话的 cwd：优先 sessionQuery 的持久头，其次内存态 sessions。 */
+/** 一次会话读取的轻量视图：解析「cwd + 最新预设」够用。 */
+interface SessionView {
+  header?: SessionHeaderFace
+  events: PluginSessionEvent[]
+}
+
+/** 释放观察租约（`Symbol.dispose` 不在本包 tsconfig 的 lib 里，故按运行时符号索引）。 */
+function releaseObservation(lease: unknown): void {
+  const disposeSymbol = (Symbol as unknown as { dispose?: symbol }).dispose
+  if (disposeSymbol === undefined || lease === null || lease === undefined) return
+  const dispose = (lease as Record<symbol, unknown>)[disposeSymbol]
+  if (typeof dispose === 'function') (dispose as () => void).call(lease)
+}
+
+/**
+ * 读取会话的轻量视图，按代价从低到高选来源：
+ *   1. `ctx.sessions`（内存态，零 IO）；
+ *   2. `sessionQuery.observeSession`（宿主内部走 detached restore，seeded 会话安全）；
+ *   3. `sessionQuery.readSession`（兜底）。
+ * 兜底不做首选的原因：宿主用 `Session.create`（snapshot 语义）重建，要求传入的 seed
+ * 长度**正好等于**继承前缀长度，因此任何 seeded 会话都会抛
+ * `seeded session constructor seed must equal its inherited prefix`。
+ */
+async function readSessionView(ctx: PluginContext, sessionId: string): Promise<SessionView | undefined> {
+  const live = ctx.get('sessions')?.get(sessionId)
+  if (live?.header !== undefined) {
+    const events = typeof live.snapshotEvents === 'function' ? live.snapshotEvents() : []
+    return { header: live.header, events: Array.isArray(events) ? events : [] }
+  }
+  const query = ctx.get('sessionQuery')
+  if (query === undefined) return undefined
+  if (typeof query.observeSession === 'function') {
+    let lease: PluginSessionObservation | undefined
+    try {
+      lease = await query.observeSession(sessionId, { projectionMode: 'none' })
+      return { header: lease?.header, events: Array.isArray(lease?.events) ? lease.events : [] }
+    } catch (error) {
+      log('sessionQuery.observeSession failed:', sessionId, String(error))
+    } finally {
+      releaseObservation(lease)
+    }
+  }
+  try {
+    const snapshot = await query.readSession(sessionId)
+    return { header: snapshot?.session, events: Array.isArray(snapshot?.events) ? snapshot.events : [] }
+  } catch (error) {
+    log('sessionQuery.readSession failed:', sessionId, String(error))
+    return undefined
+  }
+}
+
+/** 会话的 cwd：内存态优先，其次观察租约/持久层。 */
 export async function resolveSessionCwd(ctx: PluginContext, sessionId: string): Promise<string | undefined> {
   if (typeof sessionId !== 'string' || sessionId === '') return undefined
-  const query = ctx.get('sessionQuery')
-  if (query !== undefined) {
-    try {
-      const snapshot = await query.readSession(sessionId)
-      const cwd = snapshot?.session?.cwd
-      if (typeof cwd === 'string' && cwd !== '') return cwd
-    } catch (error) {
-      log('sessionQuery.readSession failed:', sessionId, String(error))
-    }
-  }
-  const sessions = ctx.get('sessions')
-  if (sessions !== undefined) {
-    try {
-      const live = sessions.get(sessionId)
-      const cwd = live?.header?.cwd
-      if (typeof cwd === 'string' && cwd !== '') return cwd
-    } catch (error) {
-      log('sessions.get failed:', sessionId, String(error))
-    }
-  }
-  return undefined
+  const cwd = (await readSessionView(ctx, sessionId))?.header?.cwd
+  return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
 }
 
 /** 会话跑在哪个 preset 上（最新 agent-preset/selected 事件优先，其次创建头）。 */
@@ -72,31 +110,20 @@ export async function resolveSessionPreset(
   sessionId: string,
 ): Promise<{ preset?: string; cwd?: string }> {
   if (typeof sessionId !== 'string' || sessionId === '') return {}
-  const query = ctx.get('sessionQuery')
-  if (query !== undefined) {
-    try {
-      const snapshot = await query.readSession(sessionId)
-      const header = snapshot?.session
-      const events = Array.isArray(snapshot?.events) ? snapshot.events : []
-      let preset: string | undefined
-      for (let i = events.length - 1; i >= 0; i -= 1) {
-        const event = events[i]
-        if (event?.type === 'agent-preset/selected') {
-          const picked = event.data?.agentPreset
-          if (typeof picked === 'string' && picked !== '') preset = picked
-          break
-        }
-      }
-      if (preset === undefined && typeof header?.agentPreset === 'string') preset = header.agentPreset
-      return { preset, cwd: typeof header?.cwd === 'string' ? header.cwd : undefined }
-    } catch (error) {
-      log('resolveSessionPreset failed:', sessionId, String(error))
+  const view = await readSessionView(ctx, sessionId)
+  const header = view?.header
+  const events = view?.events ?? []
+  let preset: string | undefined
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]
+    if (event?.type === 'agent-preset/selected') {
+      const picked = event.data?.agentPreset
+      if (typeof picked === 'string' && picked !== '') preset = picked
+      break
     }
   }
-  const cwd = await resolveSessionCwd(ctx, sessionId)
-  const sessions = ctx.get('sessions')
-  const header = sessions?.get(sessionId)?.header
-  return { preset: typeof header?.agentPreset === 'string' ? header.agentPreset : undefined, cwd }
+  if (preset === undefined && typeof header?.agentPreset === 'string') preset = header.agentPreset
+  return { preset, cwd: typeof header?.cwd === 'string' ? header.cwd : undefined }
 }
 
 /** workspace 根（已 realpath）。 */
