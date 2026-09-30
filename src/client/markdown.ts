@@ -51,7 +51,7 @@ export function parseMarkdown(source: string): MdBlock[] {
       blocks.push({ kind: 'hr' })
       continue
     }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
+    const heading = /^\s*(#{1,6})\s+(.*)$/.exec(line)
     if (heading !== null) {
       flushParagraph()
       blocks.push({ kind: 'h', level: (heading[1] ?? '#').length, text: heading[2] ?? '' })
@@ -69,7 +69,10 @@ export function parseMarkdown(source: string): MdBlock[] {
       blocks.push({ kind: 'quote', text: quote.join('\n') })
       continue
     }
-    const isTable = /^\s*\|.*\|\s*$/.test(line) && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] ?? '')
+    // 表格标记：行以 `|` 开头即可，**尾管道可选**——手写规则书的表格很容易漏收尾，
+    // 旧实现要求首尾都有 `|`，漏一个就把整张表降级成段落、把 `| --- |` 分隔行原样显示给玩家。
+    const looksLikeRow = (text: string): boolean => /^\s*\|/.test(text)
+    const isTable = looksLikeRow(line) && /^\s*\|[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1] ?? '')
     if (isTable) {
       flushParagraph()
       const splitRow = (row: string): string[] =>
@@ -77,7 +80,7 @@ export function parseMarkdown(source: string): MdBlock[] {
       const header = splitRow(line)
       const rows: string[][] = []
       let j = i + 2
-      while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j] ?? '')) {
+      while (j < lines.length && looksLikeRow(lines[j] ?? '')) {
         rows.push(splitRow(lines[j] ?? ''))
         j += 1
       }
