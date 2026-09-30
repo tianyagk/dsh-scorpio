@@ -366,12 +366,21 @@ export class ScorpioStore {
     return this.readMarkdownAt(rule.mdPath)
   }
 
+  /** 规则书/模组正文的 mtime 缓存：snapshot 每 8 秒轮询一次，未改动时不必重读磁盘。 */
+  private readonly markdownCache = new Map<string, { stamp: string; text: string }>()
+
   private async readMarkdownAt(rel: string): Promise<{ text: string; path: string; missing: boolean }> {
     try {
       const abs = await resolveInside(this.workspace, rel)
       const info = await stat(abs)
       if (!info.isFile()) return { text: '', path: rel, missing: true }
-      return { text: await readFile(abs, 'utf8'), path: rel, missing: false }
+      const stamp = `${info.mtimeMs}:${info.size}`
+      const cached = this.markdownCache.get(abs)
+      if (cached !== undefined && cached.stamp === stamp) return { text: cached.text, path: rel, missing: false }
+      const text = await readFile(abs, 'utf8')
+      this.markdownCache.set(abs, { stamp, text })
+      if (this.markdownCache.size > 64) this.markdownCache.clear()
+      return { text, path: rel, missing: false }
     } catch (error) {
       log('readMarkdownAt failed:', rel, String(error))
       return { text: '', path: rel, missing: true }
@@ -657,7 +666,9 @@ export class ScorpioStore {
     }
     const lines = raw.split('\n').filter((line) => line.trim() !== '')
     const recent: RollResult[] = []
-    for (let i = lines.length - 1; i >= 0 && recent.length < Math.max(1, Math.min(200, limit)); i -= 1) {
+    const want = Math.max(1, Math.min(200, limit))
+    // 只解析尾部 want 行：以前对整份流水逐行 JSON.parse，长战役下每次轮询都要付全额成本。
+    for (let i = lines.length - 1; i >= 0 && recent.length < want; i -= 1) {
       const line = lines[i]
       if (line === undefined) continue
       try {

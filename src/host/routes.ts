@@ -137,16 +137,16 @@ export function makeScorpioRoutes(deps: ScorpioRoutesDeps): {
   const artifactRel = async (store: ScorpioStore, rel: string, fallback: string): Promise<string> => {
     const target = (rel.trim() === '' ? fallback : rel.trim()).replace(/\\+/g, '/').replace(/^\.\//, '')
     if (target.startsWith('.scorpio/') || target === '.scorpio') {
-      throw new Error('产物不能写入 .scorpio/ 状态目录')
+      throw new PathFenceError('产物不能写入 .scorpio/ 状态目录')
     }
     if (target.startsWith('/') || target.split('/').includes('..')) {
-      throw new Error('产物路径不能是绝对路径、也不能包含 ..')
+      throw new PathFenceError('产物路径不能是绝对路径、也不能包含 ..')
     }
-    if (!/\.md$/i.test(target)) throw new Error('产物必须是 .md 文件')
+    if (!/\.md$/i.test(target)) throw new PathFenceError('产物必须是 .md 文件')
     for (const world of await store.worlds()) {
       if (world.path === '') continue
       if (target === world.path || target.startsWith(`${world.path}/`)) {
-        throw new Error(`产物不能写入世界书目录 ${world.path}/（那是玩家的源资料）`)
+        throw new PathFenceError(`产物不能写入世界书目录 ${world.path}/（那是玩家的源资料）`)
       }
     }
     return target

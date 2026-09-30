@@ -64,15 +64,22 @@ export function CharacterPage(props: CharacterPageProps): React.ReactElement {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState<string | undefined>(undefined)
   const [pendingRemove, setPendingRemove] = useState<string | undefined>(undefined)
+  const [conflict, setConflict] = useState<CharacterInstance | undefined>(undefined)
   const seenKey = useRef<string | undefined>(undefined)
 
-  // 服务端换了版本（Agent 写入 / 保存成功 / 导入模板）才覆盖草稿，纯轮询不打断编辑。
+  // 服务端换了版本（Agent 写入 / 保存成功 / 导入模板）才处理，纯轮询不打断编辑。
   useEffect(() => {
     if (seenKey.current === serverKey) return
     seenKey.current = serverKey
+    if (dirty && server !== undefined) {
+      // 玩家正在编辑时 Agent 写了新版本：不覆盖草稿，把选择权交回玩家。
+      // （旧实现直接 setDraft(server) + setDirty(false)，未保存的编辑会无声蒸发。）
+      setConflict(server)
+      return
+    }
     setDraft(server)
     setDirty(false)
-  }, [serverKey, server])
+  }, [serverKey, server, dirty])
 
   const disabled = busy || saving !== undefined
   const pool = data.pool ?? []
@@ -163,6 +170,15 @@ export function CharacterPage(props: CharacterPageProps): React.ReactElement {
 
   const save = async (mode: 'session' | 'pool'): Promise<void> => {
     if (draft === undefined) return
+    // 明文 JSON 可以被手工编辑，字段缺失时直接提交等于把残缺结构写回磁盘。
+    const required = ['attrs', 'skills', 'slots', 'statuses', 'journal'] as const
+    const missing = required.filter((key) => !Array.isArray((draft as unknown as Record<string, unknown>)[key]))
+    if (missing.length > 0) {
+      props.onError(
+        `角色卡缺少字段：${missing.join('、')}——为避免写坏数据，请先用「从规则书补齐」或重新导入这张卡。`,
+      )
+      return
+    }
     setSaving(mode)
     try {
       if (mode === 'pool') await api.saveToPool(sessionId, { ...draft, sessionId })
@@ -418,6 +434,31 @@ export function CharacterPage(props: CharacterPageProps): React.ReactElement {
             ),
           ),
         )
+
+  const conflictBanner =
+    conflict === undefined
+      ? null
+      : React.createElement(Banner, {
+          tone: 'warn',
+          text: 'Agent 在会话里更新了角色卡，而你还有未保存的修改。',
+          right: React.createElement(
+            'span',
+            { className: 'sc-row', style: { gap: 6 } },
+            React.createElement(
+              Btn,
+              {
+                size: 'sm',
+                onClick: () => {
+                  setDraft(conflict)
+                  setDirty(false)
+                  setConflict(undefined)
+                },
+              },
+              '用服务端版本',
+            ),
+            React.createElement(Btn, { size: 'sm', variant: 'ghost', onClick: () => setConflict(undefined) }, '保留我的'),
+          ),
+        })
 
   const playSection = React.createElement(
     Section,
@@ -675,6 +716,7 @@ export function CharacterPage(props: CharacterPageProps): React.ReactElement {
   return React.createElement(
     'div',
     { className: 'sc-body sc-scroll' },
+    conflictBanner,
     server === undefined && pool.length > 0
       ? React.createElement(Banner, { tone: 'info', text: '从角色池里选一张开始扮演。' })
       : null,

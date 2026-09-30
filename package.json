@@ -27,9 +27,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node src/host/selftest.ts",
     "test:preset": "node src/host/presettest.ts",
-    "selftest": "node src/host/selftest.ts && node src/host/presettest.ts && node src/host/presetprobe.ts",
+    "selftest": "node src/host/selftest.ts && node src/host/routetest.ts && node src/host/presettest.ts && node src/host/presetprobe.ts",
     "install:profile": "bash scripts/install.sh",
-    "uninstall:profile": "bash scripts/uninstall.sh"
+    "uninstall:profile": "bash scripts/uninstall.sh",
+    "test:routes": "node src/host/routetest.ts"
   },
   "keywords": [
     "deepseek",

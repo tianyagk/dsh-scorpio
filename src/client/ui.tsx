@@ -4,8 +4,15 @@
  * 刻意不引入任何 markdown 依赖：这里只需要渲染规则书正文（标题、列表、表格、
  * 引用、代码块、粗斜体、行内代码），一个 60 行的确定性渲染器足够，也让浏览器
  * bundle 保持零额外体积。
+ *
+ * markdown 的**纯解析**部分住 ./markdown.ts：那一层不 import react，因此可以被
+ * node 直接加载做自测（`node src/client/markdowntest.ts`）。本文件继续按原名
+ * 对外导出 `parseMarkdown`，接口不变。
  */
 import React, { useEffect, useState, type ReactNode } from 'react'
+import { parseMarkdown, type MdBlock } from './markdown.ts'
+
+export { parseMarkdown }
 
 /** 探测当前主题：优先读 GUI 的主题 token，其次跟随系统。 */
 export function useTheme(): 'light' | 'dark' {
@@ -201,112 +208,8 @@ export function Kv(props: { k: string; v: ReactNode }): React.ReactElement {
 
 // ── markdown 渲染 ──────────────────────────────────────────────────────────
 
-interface MdBlock {
-  kind: 'h' | 'p' | 'ul' | 'ol' | 'quote' | 'code' | 'hr' | 'table'
-  level?: number
-  text?: string
-  items?: string[]
-  rows?: string[][]
-  header?: string[]
-}
-
-/** 把 markdown 切成块（确定性、无依赖）。 */
-export function parseMarkdown(source: string): MdBlock[] {
-  const lines = String(source ?? '').replace(/\r\n?/g, '\n').split('\n')
-  const blocks: MdBlock[] = []
-  let paragraph: string[] = []
-  let fence: string[] | null = null
-
-  const flushParagraph = (): void => {
-    if (paragraph.length > 0) {
-      blocks.push({ kind: 'p', text: paragraph.join('\n') })
-      paragraph = []
-    }
-  }
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? ''
-    if (fence !== null) {
-      if (/^\s*```/.test(line)) {
-        blocks.push({ kind: 'code', text: fence.join('\n') })
-        fence = null
-      } else {
-        fence.push(line)
-      }
-      continue
-    }
-    if (/^\s*```/.test(line)) {
-      flushParagraph()
-      fence = []
-      continue
-    }
-    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-      flushParagraph()
-      blocks.push({ kind: 'hr' })
-      continue
-    }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
-    if (heading !== null) {
-      flushParagraph()
-      blocks.push({ kind: 'h', level: (heading[1] ?? '#').length, text: heading[2] ?? '' })
-      continue
-    }
-    if (/^\s*>\s?/.test(line)) {
-      flushParagraph()
-      const quote: string[] = []
-      let j = i
-      while (j < lines.length && /^\s*>\s?/.test(lines[j] ?? '')) {
-        quote.push((lines[j] ?? '').replace(/^\s*>\s?/, ''))
-        j += 1
-      }
-      i = j - 1
-      blocks.push({ kind: 'quote', text: quote.join('\n') })
-      continue
-    }
-    const isTable = /^\s*\|.*\|\s*$/.test(line) && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] ?? '')
-    if (isTable) {
-      flushParagraph()
-      const splitRow = (row: string): string[] =>
-        row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim())
-      const header = splitRow(line)
-      const rows: string[][] = []
-      let j = i + 2
-      while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j] ?? '')) {
-        rows.push(splitRow(lines[j] ?? ''))
-        j += 1
-      }
-      i = j - 1
-      blocks.push({ kind: 'table', header, rows })
-      continue
-    }
-    if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
-      flushParagraph()
-      const ordered = /^\s*\d+[.)]\s+/.test(line)
-      const items: string[] = []
-      let j = i
-      while (j < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[j] ?? '')) {
-        items.push((lines[j] ?? '').replace(/^\s*([-*+]|\d+[.)])\s+/, ''))
-        j += 1
-        // 续行（缩进）并入上一条
-        while (j < lines.length && /^\s{2,}\S/.test(lines[j] ?? '') && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[j] ?? '')) {
-          items[items.length - 1] = `${items[items.length - 1] ?? ''} ${(lines[j] ?? '').trim()}`
-          j += 1
-        }
-      }
-      i = j - 1
-      blocks.push({ kind: ordered ? 'ol' : 'ul', items })
-      continue
-    }
-    if (line.trim() === '') {
-      flushParagraph()
-      continue
-    }
-    paragraph.push(line)
-  }
-  flushParagraph()
-  if (fence !== null && fence.length > 0) blocks.push({ kind: 'code', text: fence.join('\n') })
-  return blocks
-}
+// 块解析（MdBlock + parseMarkdown）住在 ./markdown.ts：本文件只做"块 → React 元素"，
+// 不在这一层再抄一份解析器。行内标记（`code` / **粗** / *斜*）仍由下面的 inline() 处理。
 
 /** 行内标记：`code`、**粗**、*斜*。 */
 function inline(text: string, keyPrefix: string): ReactNode[] {
@@ -339,7 +242,7 @@ export function Markdown(props: { text: string; className?: string }): React.Rea
   return React.createElement(
     'div',
     { className: `sc-md ${props.className ?? ''}` },
-    ...blocks.map((block, index) => {
+    ...blocks.map((block: MdBlock, index) => {
       const key = `b${index}`
       if (block.kind === 'hr') return React.createElement('hr', { key })
       if (block.kind === 'h') {
